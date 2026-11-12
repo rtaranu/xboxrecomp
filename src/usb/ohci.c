@@ -515,9 +515,14 @@ static int guest_ok(uint32_t va, uint32_t bytes)
  * inside it is the image. Sending that one to the window delivered the
  * descriptor where the driver never looked, and it reset the port and asked
  * again, forever. */
+/* A heap block named through MmGetPhysicalAddress is RAM even below the
+ * window's high-water mark, as in apu_core.c: XAPI's pad report buffer is
+ * one, and sending it to the window froze the pad. */
 static uint32_t bus_resolve(uint32_t addr)
 {
     if (addr >= g_xbox_image_lo && addr < g_xbox_image_hi)
+        return addr;
+    if (addr && xbox_PhysRamNamedAt(addr))
         return addr;
     if (addr && addr < xbox_ContiguousAllocatedBytes())
         return OHCI_CONTIG_BASE + addr;
