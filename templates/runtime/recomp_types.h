@@ -262,6 +262,12 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
+
+/* C++ exceptions (MSVC EH frames): see xbox_memory_layout.c. */
+jmp_buf *recomp_cxx_eh_arm(uint32_t node_va);
+jmp_buf *recomp_cxx_eh_find(uint32_t node_va);
+void recomp_cxx_eh_lost(uint32_t func_va, uint32_t resume_va);
+extern RECOMP_TLS uint32_t g_cxx_eh_resume;
 extern RECOMP_TLS uint32_t g_ebp;
 
 /* EFLAGS.DF, and the signed step the string instructions take because of it.

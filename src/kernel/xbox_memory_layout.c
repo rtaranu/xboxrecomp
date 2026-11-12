@@ -1863,6 +1863,81 @@ int recomp_guest_longjmp(uint32_t buf_va, uint32_t value)
     return 0;
 }
 
+/* ---- C++ exceptions: the native half of a catch -----------------------
+ *
+ * A catch resumes mid-function in the frame that installed the handler, so
+ * the native stack is unwound to it with longjmp. Each C++ EH function arms
+ * a jmp_buf keyed by its fs:[0] node (recomp_cxx_eh_arm); recomp_cxx_throw
+ * (kernel_bridge.c) longjmps there with the continuation in
+ * g_cxx_eh_resume. Slots are per thread and re-armed on every entry; only
+ * nodes on the live fs:[0] chain are looked up.
+ */
+#define RECOMP_CXX_EH_SLOTS 1024u
+
+typedef struct {
+    uint32_t node_va;
+    jmp_buf  native;
+} recomp_cxx_eh_slot;
+
+static RECOMP_TLS recomp_cxx_eh_slot *s_eh;
+RECOMP_TLS uint32_t g_cxx_eh_resume;
+
+static recomp_cxx_eh_slot *cxx_eh_probe(uint32_t node_va, int create)
+{
+    uint32_t h, i;
+
+    if (!s_eh) {
+        if (!create)
+            return NULL;
+        s_eh = (recomp_cxx_eh_slot *)calloc(RECOMP_CXX_EH_SLOTS, sizeof *s_eh);
+        if (!s_eh) {
+            fprintf(stderr, "[CXX-EH] out of memory for the frame table\n");
+            abort();
+        }
+    }
+    h = ((node_va >> 2) * 2654435761u) >> 22;   /* 10 bits */
+    for (i = 0; i < RECOMP_CXX_EH_SLOTS; i++) {
+        recomp_cxx_eh_slot *s = &s_eh[(h + i) & (RECOMP_CXX_EH_SLOTS - 1)];
+        if (s->node_va == node_va)
+            return s;
+        if (!s->node_va) {
+            if (!create)
+                return NULL;
+            s->node_va = node_va;
+            return s;
+        }
+    }
+    if (!create)
+        return NULL;
+    {
+        static int warned;
+        if (!warned++) {
+            fprintf(stderr, "[CXX-EH] frame table full; reusing slots\n");
+            fflush(stderr);
+        }
+    }
+    s_eh[h].node_va = node_va;
+    return &s_eh[h];
+}
+
+jmp_buf *recomp_cxx_eh_arm(uint32_t node_va)
+{
+    return &cxx_eh_probe(node_va, 1)->native;
+}
+
+jmp_buf *recomp_cxx_eh_find(uint32_t node_va)
+{
+    recomp_cxx_eh_slot *s = cxx_eh_probe(node_va, 0);
+    return s ? &s->native : NULL;
+}
+
+void recomp_cxx_eh_lost(uint32_t func_va, uint32_t resume_va)
+{
+    fprintf(stderr, "[CXX-EH] sub_%08X has no label for continuation 0x%08X;"
+            " returning from it instead\n", func_va, resume_va);
+    fflush(stderr);
+}
+
 /* Watchdog: dump the guest call stack if the title stops making progress.
  *
  * A hang gives nothing to work from -- no crash, no last log line, no native
