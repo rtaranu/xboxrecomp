@@ -67,6 +67,11 @@ int  xbox_FramebufferDumpBmp(const char *path);
  * UTF-16 title (40 chars max); the stats come from each flip. */
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
 void xbox_FramebufferWindowFrameStats(uint32_t draws);
+/* For a host renderer presenting to the window itself: the HWND (NULL until
+ * the window exists), and a switch that stops the window drawing guest
+ * memory; it still pumps messages and updates the title bar. */
+void *xbox_FramebufferWindowHandle(void);
+void  xbox_FramebufferWindowSetExternal(int on);
 
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit
