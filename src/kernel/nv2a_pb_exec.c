@@ -792,6 +792,14 @@ void nv2a_backend_register(const Nv2aBackend *backend)
     nv2a_backend_register_with_present_sync(backend, NULL);
 }
 
+/* nv2a_pb_set_draws_off (nv2a_backend.h) */
+static volatile int s_draws_off;
+
+void nv2a_pb_set_draws_off(int off)
+{
+    s_draws_off = off ? 1 : 0;
+}
+
 static int backend_draws(void)
 {
     return s_backend && s_backend->draw;
@@ -4400,6 +4408,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                     s_gpu.clear_color, 10);
+        if (s_draws_off)
+            break;
         clear_surface(param);
         if (param & 0x01)                         /* Z */
             zbuf_clear();
@@ -4415,7 +4425,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             /* Three ways a batch can have arrived, and only one is in use at
              * a time: vertices completed by SET_VERTEX4F, a payload written
              * with INLINE_ARRAY, or indices into the title's own arrays. */
-            if (s_gpu.imm_count)
+            if (s_draws_off)
+                ;                          /* a host renderer draws */
+            else if (s_gpu.imm_count)
                 draw_immediate();
             else if (s_gpu.inline_count)
                 draw_inline_array();
@@ -4539,7 +4551,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
             draws_at_flip = s_gpu.draws;
         }
-        if (s_gpu.pitch) {
+        if (s_gpu.pitch && !s_draws_off) {
             extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
             uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
                                                : s_gpu.color_offset;
