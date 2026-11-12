@@ -240,8 +240,26 @@ static void kernel_data_init(void)
      */
     {
         const char *cmdline = getenv("RECOMP_CMDLINE");
+        const char *relaunch = getenv("RECOMP_LAUNCH_DATA");
+        FILE *lf = (relaunch && *relaunch) ? fopen(relaunch, "rb") : NULL;
 
-        if (cmdline && *cmdline) {
+        /* After a self-relaunch (bridge_HalReturnToFirmware), restore the
+         * launch data page. */
+        if (lf) {
+            uint32_t page = xbox_HeapAlloc(0x1000, 4096);
+            size_t got = 0;
+            if (page)
+                got = fread(XBOX_TO_NATIVE(page), 1, 0x1000, lf);
+            fclose(lf);
+            remove(relaunch);
+            if (page && got == 0x1000) {
+                BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = page;
+                fprintf(stderr, "  Launch data: restored from the previous"
+                        " image at 0x%08X (type %u)\n", page, BRIDGE_MEM32(page));
+            } else {
+                BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = 0;
+            }
+        } else if (cmdline && *cmdline) {
             uint32_t page = xbox_HeapAlloc(0x1000 + 0x0C00, 4096);
             if (page) {
                 size_t n = strlen(cmdline);
@@ -1863,6 +1881,74 @@ static void bridge_HalReturnToFirmware(void)
             fprintf(stderr, "  [KERNEL] waited %dms for the video to finish\n",
                     waited);
     }
+
+    /* A reboot into the title's own XBE (Xbox Unreal Engine loads each level
+     * this way): save the launch data page, restart this executable with
+     * RECOMP_LAUNCH_DATA naming the file, and exit. RECOMP_RELAUNCH=0 turns
+     * it off. */
+#ifdef _WIN32
+    {
+        uint32_t page = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
+        const char *off = getenv("RECOMP_RELAUNCH");
+        char path[520], self[520];
+        uint32_t i, self_buf = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE
+                                            + KDATA_XE_IMAGE_FILENAME + 4);
+        uint16_t self_len = BRIDGE_MEM16(XBOX_KERNEL_DATA_BASE
+                                         + KDATA_XE_IMAGE_FILENAME);
+
+        /* "<device>;<file>" against this image's XeImageFileName: only the
+         * running XBE can be restarted. */
+        for (i = 0; page && i < sizeof(path) - 1; i++) {
+            uint8_t c = BRIDGE_MEM8(page + 8 + i);
+            if (!c) break;
+            path[i] = c == ';' ? '\\' : (char)tolower(c);
+        }
+        path[page ? i : 0] = 0;
+        for (i = 0; i < self_len && i < sizeof(self) - 1; i++)
+            self[i] = (char)tolower(BRIDGE_MEM8(self_buf + i));
+        self[i] = 0;
+        if (routine == 2 && page && !(off && *off == '0') && self[0]
+            && strcmp(path, self) == 0) {
+            char tmp[MAX_PATH], file[MAX_PATH];
+            FILE *f;
+            DWORD n = GetTempPathA(sizeof tmp, tmp);
+
+            if (n && n < sizeof tmp
+                && GetTempFileNameA(tmp, "xld", 0, file)
+                && (f = fopen(file, "wb")) != NULL) {
+                STARTUPINFOW si;
+                PROCESS_INFORMATION pi;
+                int ok;
+
+                fwrite(XBOX_TO_NATIVE(page), 1, 0x1000, f);
+                fclose(f);
+                SetEnvironmentVariableA("RECOMP_LAUNCH_DATA", file);
+                memset(&si, 0, sizeof si);
+                si.cb = sizeof si;
+                ok = CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, TRUE,
+                                    0, NULL, NULL, &si, &pi);
+                if (ok) {
+                    fprintf(stderr, "  [KERNEL] relaunching the title with its"
+                            " launch data (pid %lu)\n",
+                            (unsigned long)pi.dwProcessId);
+                    fflush(stderr);
+                    fflush(stdout);
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    /* The child inherits stdout and stderr; a wrapper
+                     * waiting on this process stops here. */
+                    ExitProcess(0);
+                }
+                fprintf(stderr, "  [KERNEL] relaunch failed (%lu); exiting\n",
+                        (unsigned long)GetLastError());
+                remove(file);
+            }
+        } else if (routine == 2 && page) {
+            fprintf(stderr, "  [KERNEL] launch of \"%s\" is not this image"
+                    " (\"%s\"); not relaunched\n", path, self);
+        }
+    }
+#endif
 
     xbox_HalReturnToFirmware(routine);
 }
