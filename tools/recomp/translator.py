@@ -542,6 +542,7 @@ class FunctionTranslator:
         """
         self.xbe_data = xbe_data
         self.func_db = func_db
+        self.cxx_eh = {}   # discover_cxx_eh
         self.icall_sites = dict(icall_sites or {})
         self.label_db = label_db or {}
         self.classification_db = classification_db or {}
@@ -2725,6 +2726,132 @@ class FunctionTranslator:
         return (imm_refs, computed_jump_edges, debug_slide_int3s,
                 debug_slide_bypasses, switch_leaders)
 
+    # ---- MSVC C++ exception frames ------------------------------------
+    #
+    # A catch resumes mid-function (MSVC _JumpToContinuation). Each function
+    # that installs a C++ EH frame arms a native jmp_buf after its fs:[0]
+    # store and gets a label for every continuation its catch funclets
+    # return (`mov eax, <cont>; ret`); recomp_cxx_throw longjmps back.
+
+    CXX_EH_MAGIC = (0x19930520, 0x19930521, 0x19930522)
+    _CXX_EH_INSTALL = bytes.fromhex("6aff68")
+    _CXX_EH_FS_LOAD = bytes.fromhex("64a100000000")
+
+    def _img_bytes(self, va, n):
+        off = va_to_file_offset(va)
+        if off is None or off + n > len(self.xbe_data):
+            return None
+        return self.xbe_data[off:off + n]
+
+    def _img_u32(self, va):
+        b = self._img_bytes(va, 4)
+        return None if b is None else struct.unpack("<I", b)[0]
+
+    def _cxx_funcinfo(self, stub):
+        b = self._img_bytes(stub, 10)
+        if not b or b[0] != 0xB8 or b[5] != 0xE9:
+            return None
+        fi = struct.unpack_from("<I", b, 1)[0]
+        return fi if self._img_u32(fi) in self.CXX_EH_MAGIC else None
+
+    def discover_cxx_eh(self, verbose=True):
+        """Find functions that install MSVC C++ EH frames.
+
+        Sets self.cxx_eh = {func_start: {"funcinfo", "continuations"}} and
+        returns the catch handlers and unwind actions that are not function
+        starts (they are called by address and need seeds).
+        """
+        self.cxx_eh = {}
+        missing = set()
+        for start, info in sorted(self.func_db.items()):
+            end = info.get("end") or start + info.get("size", 0)
+            if isinstance(end, str):
+                end = int(end, 0)
+            if end <= start or end - start > 0x100000:
+                continue
+            raw = self._img_bytes(start, end - start)
+            if not raw:
+                continue
+            i = raw.find(self._CXX_EH_INSTALL)
+            while i != -1:
+                if raw[i + 7:i + 13] == self._CXX_EH_FS_LOAD:
+                    stub = struct.unpack_from("<I", raw, i + 3)[0]
+                    fi = self._cxx_funcinfo(stub)
+                    if fi is not None:
+                        conts, refs = self._cxx_eh_tables(fi, start, end)
+                        ent = self.cxx_eh.setdefault(
+                            start, {"funcinfo": fi, "continuations": set(),
+                                    "tail_continuations": set()})
+                        ent["continuations"] |= conts[0]
+                        ent["tail_continuations"] |= conts[1]
+                        missing |= {a for a in refs if a not in self.func_db}
+                i = raw.find(self._CXX_EH_INSTALL, i + 1)
+        if verbose:
+            n_try = sum(1 for e in self.cxx_eh.values()
+                        if e["continuations"] or e["tail_continuations"])
+            print(f"  C++ EH: {len(self.cxx_eh)} functions install frames,"
+                  f" {n_try} with catch continuations")
+            for a in sorted(missing):
+                print(f"  C++ EH: WARNING funclet 0x{a:08X} is not a function"
+                      f" start; seed it")
+        return missing
+
+    def _cxx_eh_tables(self, fi, start, end):
+        """Continuations and funclet addresses of one FuncInfo.
+
+        Returns ((inside, tails), refs): continuations inside [start, end)
+        become labels; one just past its funclet that the detector made a
+        function of its own (a split-off epilogue) is reached by tail call.
+        """
+        conts, tails, refs = set(), set(), set()
+        max_state = self._img_u32(fi + 4) or 0
+        umap = self._img_u32(fi + 8) or 0
+        n_try = self._img_u32(fi + 12) or 0
+        tmap = self._img_u32(fi + 16) or 0
+        for st in range(min(max_state, 4096)):
+            act = self._img_u32(umap + st * 8 + 4)
+            if act:
+                refs.add(act)
+        for t in range(min(n_try, 256)):
+            nc = self._img_u32(tmap + t * 20 + 12) or 0
+            harr = self._img_u32(tmap + t * 20 + 16) or 0
+            for c in range(min(nc, 64)):
+                h = self._img_u32(harr + c * 16 + 12)
+                if not h:
+                    continue
+                refs.add(h)
+                blob = self._img_bytes(h, 0x600) or b""
+                for k in range(len(blob) - 5):
+                    if blob[k] == 0xB8 and blob[k + 5] == 0xC3:
+                        v = struct.unpack_from("<I", blob, k + 1)[0]
+                        if start <= v < end:
+                            conts.add(v)
+                        elif h < v <= h + 0x600 and v in self.func_db:
+                            tails.add(v)
+        return (conts, tails), refs
+
+    def cxx_eh_continuations(self, start):
+        ent = getattr(self, "cxx_eh", {}).get(start)
+        return set(ent["continuations"]) if ent else set()
+
+    def _arm_cxx_eh(self, start, stmts, conts):
+        """Arm a native jmp_buf after each fs:[0] store in a C++ EH function."""
+        out = []
+        for stmt in stmts:
+            out.append(stmt)
+            if stmt.strip() != "MEM32(XBOX_FS_BASE) = esp;":
+                continue
+            cases = " ".join(f"if (g_cxx_eh_resume == 0x{a:08X}u) goto loc_{a:08X};"
+                             for a in sorted(conts))
+            for a in sorted(self.cxx_eh[start].get("tail_continuations", ())):
+                cases += (f" if (g_cxx_eh_resume == 0x{a:08X}u) {{ g_seh_ebp = ebp;"
+                          f" {self.lifter._call_target_name(a)}(); return; }}")
+            out.append(
+                "if (setjmp(*recomp_cxx_eh_arm(esp))) { ebp = g_seh_ebp; "
+                f"{cases} recomp_cxx_eh_lost(0x{start:08X}u, g_cxx_eh_resume);"
+                " return; } /* C++ EH frame: catch resumes here */")
+        return out
+
     def decode_function(self, start, end):
         """Recover instructions and blocks, including indirect-entry leaders."""
         recovered = self._recovered_cfg.get(start)
@@ -2785,7 +2912,8 @@ class FunctionTranslator:
         self.lifter.imm_code_refs = imm_refs
 
         # Build basic blocks
-        forced = getattr(self, "_forced_leaders", None)
+        forced = set(getattr(self, "_forced_leaders", None) or ())
+        forced |= self.cxx_eh_continuations(start)
         if forced:
             switch_leaders = set(switch_leaders or ()) | {
                 a for a in forced if start < a < end}
@@ -3263,6 +3391,9 @@ class FunctionTranslator:
         label_addrs |= self.lifter.imm_code_refs
         label_addrs.update(debug_slide_bypasses.values())
         label_addrs.update(switch_leaders)
+        cxx_conts = {a for a in self.cxx_eh_continuations(start)
+                     if a in {insn.address for insn in instructions}}
+        label_addrs |= cxx_conts
 
         # Which blocks can reach each block. Flag state has to follow control
         # flow, not address order: an optimising compiler routinely lets a jcc
@@ -3370,6 +3501,8 @@ class FunctionTranslator:
 
             stmts, out_state[bb.start] = lift_basic_block(
                 self.lifter, bb, flag_state=incoming)
+            if start in self.cxx_eh:
+                stmts = self._arm_cxx_eh(start, stmts, cxx_conts)
 
             # A join whose predecessors disagree: let each edge evaluate the
             # condition (see _edge_flag_plan). Blocks that may be entered
@@ -3663,6 +3796,7 @@ class BatchTranslator:
             self.translator.discover_static_indirect_targets()
         self.translator.discover_cfg_ownership()
         self.translator.discover_jump_table_entries()
+        self.translator.discover_cxx_eh()
 
     def get_functions_by_category(self, categories=None, exclude_categories=None):
         """
