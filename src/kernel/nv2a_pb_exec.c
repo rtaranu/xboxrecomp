@@ -834,6 +834,14 @@ void nv2a_backend_register(const Nv2aBackend *backend)
     nv2a_backend_register_with_present_sync(backend, NULL);
 }
 
+/* nv2a_pb_set_draws_off (nv2a_backend.h) */
+static volatile int s_draws_off;
+
+void nv2a_pb_set_draws_off(int off)
+{
+    s_draws_off = off ? 1 : 0;
+}
+
 /* The optional back end that takes batches before transform
  * (nv2a_backend_batch.h). */
 static const Nv2aBatchBackend *s_batch_backend;
@@ -4874,6 +4882,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             current_target(&target);
             s_capture->clear(&target);
         }
+        if (s_draws_off)
+            break;
         clear_surface(param);
         if (param & 0x01)                         /* Z */
             zbuf_clear();
@@ -4895,7 +4905,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 fill_raw_batch(&r, s_gpu.imm_count || s_gpu.inline_count);
                 s_capture->batch(&r.b);
             }
-            if (s_gpu.imm_count)
+            if (s_draws_off)
+                ;                          /* a host renderer draws */
+            else if (s_gpu.imm_count)
                 draw_immediate();
             else if (s_gpu.inline_count)
                 draw_inline_array();
@@ -5009,7 +5021,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         uint32_t aa_sy = s_gpu.aa_sy > 1.5f ? 2 : 1;
         int shown = 0;          /* the back end hands the picture over itself */
 
-        if (!s_gpu.pitch)
+        if (!s_gpu.pitch || s_draws_off)
             done = 0;
         if (s_backend_present) {
             Nv2aPresent p;

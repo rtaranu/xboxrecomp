@@ -151,4 +151,9 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 
+/* Nonzero: draw nothing, for a host renderer that draws from the title's
+ * API calls. The pushbuffer is still walked (fences, semaphores, notifiers,
+ * flips); clears, batches and the flip's copy to the window are skipped. */
+void nv2a_pb_set_draws_off(int off);
+
 #endif /* NV2A_BACKEND_H */
