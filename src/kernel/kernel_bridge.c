@@ -5372,17 +5372,270 @@ static void bridge_ObReferenceObjectByHandle(void)
     g_eax = 0;  /* STATUS_SUCCESS */
 }
 
+/* ── C++ exceptions ─────────────────────────────────────────────────────
+ *
+ * MSVC throws with RaiseException(0xE06D7363, {magic, object, ThrowInfo}).
+ * The fs:[0] walk __CxxFrameHandler would do is done here in host code:
+ * find the catch in the FuncInfo tables, run the unwind actions of the
+ * frames left, call the catch funclet, then longjmp to the jmp_buf the
+ * translator armed in the catching function (recomp_cxx_eh_arm), which
+ * jumps to the continuation. Non-C++ frames are skipped; an uncaught
+ * throw is logged and returns. */
+#include <setjmp.h>
+extern RECOMP_TLS uint32_t g_ebp;
+jmp_buf *recomp_cxx_eh_find(uint32_t node_va);
+extern RECOMP_TLS uint32_t g_cxx_eh_resume;
+
+#define CXX_EH_MAGIC_LO 0x19930520u
+#define CXX_EH_MAGIC_HI 0x19930522u
+#define CXX_EH_FAKE_RET 0xCEEC0DE0u
+
+static RECOMP_TLS uint32_t s_cxx_cur_obj, s_cxx_cur_ti;
+
+static int cxx_guest_ok(uint32_t va, uint32_t len)
+{
+    return va >= 0x00010000u && va + len < (uint32_t)g_xbox_total_ram;
+}
+
+/* FuncInfo of a C++ frame handler stub, or 0. */
+static uint32_t cxx_funcinfo(uint32_t handler)
+{
+    const uint8_t *p;
+    uint32_t fi, magic;
+
+    if (!cxx_guest_ok(handler, 10))
+        return 0;
+    p = (const uint8_t *)XBOX_TO_NATIVE(handler);
+    if (p[0] != 0xB8 || p[5] != 0xE9)
+        return 0;
+    memcpy(&fi, p + 1, 4);
+    if (!cxx_guest_ok(fi, 20))
+        return 0;
+    magic = BRIDGE_MEM32(fi);
+    return (magic >= CXX_EH_MAGIC_LO && magic <= CXX_EH_MAGIC_HI) ? fi : 0;
+}
+
+/* Call a recompiled funclet/destructor at va with the given frame. */
+static void cxx_call(uint32_t va, uint32_t frame_ebp, uint32_t this_ptr,
+                     const char *what)
+{
+    recomp_func_t fn = recomp_lookup(va);
+
+    if (!fn)
+        fn = recomp_lookup_manual(va);
+    if (!fn) {
+        fprintf(stderr, "[CXX-EH] no recompiled code for %s 0x%08X\n", what, va);
+        fflush(stderr);
+        g_eax = 0;
+        return;
+    }
+    g_ebp = g_seh_ebp = frame_ebp;
+    g_ecx = this_ptr;
+    g_esp -= 4;
+    BRIDGE_MEM32(g_esp) = CXX_EH_FAKE_RET;
+    fn();
+}
+
+/* Run a frame's unwind actions from its current state down to target. */
+static void cxx_unwind_to(uint32_t node, uint32_t fi, int32_t target)
+{
+    int32_t cur = (int32_t)BRIDGE_MEM32(node + 8);
+    uint32_t max_state = BRIDGE_MEM32(fi + 4), umap = BRIDGE_MEM32(fi + 8);
+    int guard = 0;
+
+    while (cur != target && cur >= 0 && (uint32_t)cur < max_state
+           && guard++ < 4096) {
+        int32_t next = (int32_t)BRIDGE_MEM32(umap + (uint32_t)cur * 8);
+        uint32_t action = BRIDGE_MEM32(umap + (uint32_t)cur * 8 + 4);
+        BRIDGE_MEM32(node + 8) = (uint32_t)next;
+        if (action)
+            cxx_call(action, node + 0xC, 0, "unwind action");
+        cur = next;
+    }
+    BRIDGE_MEM32(node + 8) = (uint32_t)cur;
+}
+
+/* Does catch handler ht take an exception described by ThrowInfo ti?
+ * *ct gets the matching CatchableType (0 for catch(...)). */
+static int cxx_catch_matches(uint32_t ht, uint32_t ti, uint32_t *ct)
+{
+    uint32_t ptype = BRIDGE_MEM32(ht + 4), cta, n, i;
+
+    *ct = 0;
+    if (!ptype)
+        return 1;                                  /* catch (...) */
+    cta = BRIDGE_MEM32(ti + 12);
+    if (!cxx_guest_ok(cta, 4))
+        return 0;
+    n = BRIDGE_MEM32(cta);
+    for (i = 0; i < n && i < 64; i++) {
+        uint32_t c = BRIDGE_MEM32(cta + 4 + i * 4);
+        uint32_t ctype = BRIDGE_MEM32(c + 4);
+        if (ctype == ptype
+            || strncmp((const char *)XBOX_TO_NATIVE(ctype + 8),
+                       (const char *)XBOX_TO_NATIVE(ptype + 8), 256) == 0) {
+            *ct = c;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Handle a C++ throw. Returns 0 (doing nothing) when no frame catches it;
+ * otherwise does not return. */
+static int recomp_cxx_throw(uint32_t record)
+{
+    uint32_t obj, ti, top, node, fi = 0, ht = 0, ct = 0, ebp_f, cont;
+    int32_t try_lo = 0, try_hi = 0;
+    jmp_buf *jb;
+    int depth = 0, found = 0;
+    static int traced = -1;
+
+    if (traced < 0)
+        traced = getenv("RECOMP_CXX_EH_TRACE") != NULL;
+    if (BRIDGE_MEM32(record + 0x10) < 3)
+        return 0;
+    {
+        uint32_t magic = BRIDGE_MEM32(record + 0x14);
+        if (magic < CXX_EH_MAGIC_LO || magic > CXX_EH_MAGIC_HI)
+            return 0;
+    }
+    obj = BRIDGE_MEM32(record + 0x18);
+    ti  = BRIDGE_MEM32(record + 0x1C);
+    if (!ti) {                                     /* throw; */
+        obj = s_cxx_cur_obj;
+        ti  = s_cxx_cur_ti;
+        if (!ti)
+            return 0;
+    }
+
+    top = BRIDGE_MEM32(g_fs_base);
+    for (node = top; node && node != 0xFFFFFFFFu && depth < 256;
+         node = BRIDGE_MEM32(node), depth++) {
+        uint32_t ntry, tmap, t;
+        int32_t state;
+
+        if (!cxx_guest_ok(node, 16))
+            break;
+        fi = cxx_funcinfo(BRIDGE_MEM32(node + 4));
+        if (!fi)
+            continue;
+        state = (int32_t)BRIDGE_MEM32(node + 8);
+        ntry = BRIDGE_MEM32(fi + 12);
+        tmap = BRIDGE_MEM32(fi + 16);
+        for (t = 0; t < ntry && !found; t++) {
+            uint32_t e = tmap + t * 20, nc, harr, c;
+            try_lo = (int32_t)BRIDGE_MEM32(e);
+            try_hi = (int32_t)BRIDGE_MEM32(e + 4);
+            if (state < try_lo || state > try_hi)
+                continue;
+            nc = BRIDGE_MEM32(e + 12);
+            harr = BRIDGE_MEM32(e + 16);
+            for (c = 0; c < nc; c++) {
+                if (cxx_catch_matches(harr + c * 16, ti, &ct)) {
+                    ht = harr + c * 16;
+                    found = 1;
+                    break;
+                }
+            }
+        }
+        if (found)
+            break;
+    }
+    if (!found) {
+        fprintf(stderr, "[CXX-EH] no catch for a C++ exception (object 0x%08X)\n", obj);
+        fflush(stderr);
+        return 0;
+    }
+    jb = recomp_cxx_eh_find(node);
+    if (!jb) {
+        fprintf(stderr, "[CXX-EH] catching frame 0x%08X was never armed"
+                " (its function is not marked as a C++ EH function)\n", node);
+        fflush(stderr);
+        return 0;
+    }
+    ebp_f = node + 0xC;
+    if (traced) {
+        fprintf(stderr, "[CXX-EH] throw obj 0x%08X caught by frame 0x%08X"
+                " (FuncInfo 0x%08X, handler 0x%08X)\n",
+                obj, node, fi, BRIDGE_MEM32(ht + 12));
+        fflush(stderr);
+    }
+
+    /* Unwind every frame above the catching one, innermost first. */
+    {
+        uint32_t n;
+        for (n = top; n && n != node; n = BRIDGE_MEM32(n)) {
+            uint32_t nfi = cxx_funcinfo(BRIDGE_MEM32(n + 4));
+            if (nfi)
+                cxx_unwind_to(n, nfi, -1);
+            BRIDGE_MEM32(g_fs_base) = BRIDGE_MEM32(n);
+        }
+    }
+    cxx_unwind_to(node, fi, try_lo);
+    BRIDGE_MEM32(g_fs_base) = node;
+
+    /* Initialise the catch object. */
+    {
+        uint32_t adj = BRIDGE_MEM32(ht), ptype = BRIDGE_MEM32(ht + 4);
+        int32_t disp = (int32_t)BRIDGE_MEM32(ht + 8);
+        if (ptype && disp && ct) {
+            uint32_t dest = ebp_f + (uint32_t)disp;
+            uint32_t src = obj + BRIDGE_MEM32(ct + 8);     /* PMD.mdisp */
+            uint32_t size = BRIDGE_MEM32(ct + 0x14);
+            uint32_t copy = BRIDGE_MEM32(ct + 0x18);
+            if (adj & 8)                                    /* reference */
+                BRIDGE_MEM32(dest) = src;
+            else if ((BRIDGE_MEM32(ct) & 1) || !copy)       /* simple type */
+                memcpy(XBOX_TO_NATIVE(dest), XBOX_TO_NATIVE(src), size ? size : 4);
+            else {                                          /* copy ctor */
+                g_esp -= 4;
+                BRIDGE_MEM32(g_esp) = src;
+                cxx_call(copy, ebp_f, dest, "copy constructor");
+            }
+        }
+    }
+
+    BRIDGE_MEM32(node + 8) = (uint32_t)(try_hi + 1);
+    {
+        uint32_t save_obj = s_cxx_cur_obj, save_ti = s_cxx_cur_ti;
+        s_cxx_cur_obj = obj;
+        s_cxx_cur_ti = ti;
+        cxx_call(BRIDGE_MEM32(ht + 12), ebp_f, 0, "catch block");
+        cont = g_eax;
+        s_cxx_cur_obj = save_obj;
+        s_cxx_cur_ti = save_ti;
+    }
+    /* Destroy the exception object. */
+    {
+        uint32_t dtor = BRIDGE_MEM32(ti + 4);
+        if (dtor)
+            cxx_call(dtor, ebp_f, obj, "exception destructor");
+    }
+
+    if (traced) {
+        fprintf(stderr, "[CXX-EH] resuming at 0x%08X\n", cont);
+        fflush(stderr);
+    }
+    g_esp = BRIDGE_MEM32(ebp_f - 0x10);
+    g_ebp = g_seh_ebp = ebp_f;
+    g_cxx_eh_resume = cont;
+    longjmp(*jb, 1);
+}
+
 /* ── RtlRaiseException (ordinal 302) ─────────────────────
  * VOID RtlRaiseException(PEXCEPTION_RECORD ExceptionRecord)
  *
- * Called by CRT / SEH code to raise structured exceptions.
- * On Xbox this triggers the kernel exception dispatcher.
- * For recompilation, we log and continue (no real SEH dispatch yet).
+ * C++ exceptions go to recomp_cxx_throw; other codes are logged and
+ * the call returns (no SEH dispatch).
  */
 static void bridge_RtlRaiseException(void)
 {
     uint32_t record_ptr = STACK_ARG(0);
     uint32_t code = record_ptr ? BRIDGE_MEM32(record_ptr) : 0;
+
+    if (code == 0xE06D7363u)
+        recomp_cxx_throw(record_ptr);   /* returns only when uncaught */
 
     static int raise_count = 0;
     raise_count++;
