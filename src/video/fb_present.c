@@ -47,6 +47,8 @@
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
 static volatile LONG s_fb_running;
+static volatile LONG s_fb_external;   /* a host renderer presents (video_player.h) */
+static HWND volatile s_fb_hwnd;
 static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
 static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
 
@@ -542,6 +544,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
         return 0;
     }
     hdc = GetDC(hwnd);
+    s_fb_hwnd = hwnd;
     {
         const char *fs = getenv("RECOMP_FULLSCREEN");
         if (fs && *fs && *fs != '0')
@@ -572,7 +575,9 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
-        if (s_rgb && fb_copy_presented_frame(s_rgb)) {
+        if (InterlockedCompareExchange(&s_fb_external, 1, 1)) {
+            /* A host renderer owns the window's pixels. */
+        } else if (s_rgb && fb_copy_presented_frame(s_rgb)) {
             /* A finished frame, published by the flip. Copied into s_rgb so
              * the dump path and GDI see one consistent image even if the
              * next flip lands mid-blit. */
@@ -632,6 +637,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     }
 
     gpu_present_shutdown();
+    s_fb_hwnd = NULL;
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
     free(s_rgb);
@@ -639,6 +645,16 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     free(s_pvideo_source);
     s_pvideo_source = NULL;
     return 0;
+}
+
+void *xbox_FramebufferWindowHandle(void)
+{
+    return (void *)s_fb_hwnd;
+}
+
+void xbox_FramebufferWindowSetExternal(int on)
+{
+    InterlockedExchange(&s_fb_external, on ? 1 : 0);
 }
 
 void xbox_FramebufferWindowStart(void)
