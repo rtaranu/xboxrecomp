@@ -463,4 +463,15 @@ int xbox_HostWindowMain(int (*guest_main)(void))
     return s_guest_rc;
 }
 
+/* No host-renderer presentation on the SDL window yet. */
+void *xbox_FramebufferWindowHandle(void)
+{
+    return NULL;
+}
+
+void xbox_FramebufferWindowSetExternal(int on)
+{
+    (void)on;
+}
+
 #endif /* !_WIN32 */
