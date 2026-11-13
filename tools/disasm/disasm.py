@@ -56,10 +56,12 @@ class Disassembler:
         # not guesses, so the mid-instruction guard below does not apply.
         self.observed_seeds = observed_seeds or set()
         # Never accepted as function starts ("not_function" seed entries);
-        # in the cache key as negatives.
+        # in the cache key as negatives. Observed seeds go in too, offset by
+        # 2**32: they pass the mid-instruction guard, so they change the result.
         self.not_functions = set(not_functions or ())
         self._cache_seeds = (list(self.seed_functions)
-                             + [-a for a in sorted(self.not_functions)])
+                             + [-a for a in sorted(self.not_functions)]
+                             + [a + (1 << 32) for a in sorted(self.observed_seeds)])
 
         # Components (initialized during run)
         self.image: Optional[BinaryImage] = None
