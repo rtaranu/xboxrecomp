@@ -377,6 +377,11 @@ NTSTATUS __stdcall xbox_ExSaveNonVolatileSetting(
 ULONG __stdcall xbox_PhyGetLinkState(BOOLEAN Verify)
 {
     (void)Verify;
+    /* RECOMP_ETH_LINK=0: no cable. With a link and no NIC model behind it,
+     * XNet's DHCP waits out its timeouts. */
+    const char *e = getenv("RECOMP_ETH_LINK");
+    if (e && e[0] == '0')
+        return 0;
     /* Return link up, 100 Mbps, full duplex */
     return 0x01; /* XNET_ETHERNET_LINK_ACTIVE */
 }
