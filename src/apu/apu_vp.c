@@ -1668,6 +1668,62 @@ static void vp_trace_positions(MCPXAPUState *d)
     }
 }
 
+/* RECOMP_APU_AUDIT=<seconds>: periodically, each voice in the 2D, 3D and MP
+ * lists (state, offset, lock); "still" marks an active voice that has not
+ * moved, "unlisted" an active voice no list reaches. */
+static int s_audit_secs = -1;
+static unsigned s_audit_frames;
+static uint32_t s_audit_cbo[MCPX_HW_MAX_VOICES];
+
+static void vp_audit(MCPXAPUState *d)
+{
+    static const char *const names[3] = { "2D", "3D", "MP" };
+    uint8_t listed[MCPX_HW_MAX_VOICES] = { 0 };
+
+    if (s_audit_secs < 0) {
+        const char *e = getenv("RECOMP_APU_AUDIT");
+        s_audit_secs = e && *e ? atoi(e) : 0;
+    }
+    if (s_audit_secs <= 0 || ++s_audit_frames % (1500u * (unsigned)s_audit_secs))
+        return;
+    fprintf(stderr, "[APU-AUDIT] t=%us\n", s_audit_frames / 1500u);
+    for (int list = 0; list < 3; list++) {
+        uint32_t h = d->regs[voice_list_regs[list].top];
+        for (int i = 0; h != 0xFFFF && i < MCPX_HW_MAX_VOICES; i++) {
+            uint16_t v = (uint16_t)h;
+            uint32_t st = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, 0xFFFFFFFF);
+            uint32_t fmt = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, 0xFFFFFFFF);
+            uint32_t cbo = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET,
+                                          NV_PAVS_VOICE_PAR_OFFSET_CBO);
+            bool stream = (fmt & NV_PAVS_VOICE_CFG_FMT_DATA_TYPE) != 0;
+            listed[v] = (uint8_t)(list + 1);
+            fprintf(stderr, "  %s v%u state=%08X%s%s%s%s fmt=%08X%s cbo=%u ebo=%u%s",
+                    names[list], (unsigned)v, st,
+                    st & NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE ? " active" : " idle",
+                    st & NV_PAVS_VOICE_PAR_STATE_PAUSED ? " paused" : "",
+                    d->vp.voice_locked[v] ? " locked" : "",
+                    (st & NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE) && cbo == s_audit_cbo[v] ? " still" : "",
+                    fmt, stream ? " stream" : "", cbo,
+                    voice_get_mask(d, v, NV_PAVS_VOICE_PAR_NEXT, NV_PAVS_VOICE_PAR_NEXT_EBO),
+                    stream ? "" : "\n");
+            if (stream)
+                fprintf(stderr, " ssl=%d/%d A=%u+%u B=%u+%u\n",
+                        d->vp.ssl[v].ssl_index, d->vp.ssl[v].ssl_seg,
+                        d->vp.ssl[v].base[0], d->vp.ssl[v].count[0],
+                        d->vp.ssl[v].base[1], d->vp.ssl[v].count[1]);
+            s_audit_cbo[v] = cbo;
+            h = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                               NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+        }
+    }
+    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++)
+        if (!listed[v] && voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_STATE,
+                                         NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE))
+            fprintf(stderr, "  unlisted v%u state=%08X%s\n", v,
+                    voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_STATE, 0xFFFFFFFF),
+                    d->vp.voice_locked[v] ? " locked" : "");
+}
+
 void mcpx_apu_vp_frame(MCPXAPUState *d,
                         float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
@@ -1711,6 +1767,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
     }
 
     vp_trace_positions(d);
+    vp_audit(d);
     vp_stat_report();
     if (s_ring_on > 0 && ++s_ring_frames % 1500 == 0)
         vp_ring_report(++s_ring_secs);
