@@ -294,7 +294,8 @@ static uint8_t synthetic_buttons(void)
  *
  * Buttons: up down left right start back lthumb rthumb (the digital byte),
  * a b x y black white lt rt (the analog bytes, reported fully pressed), and
- * lleft lright lup ldown / rleft rright rup rdown (a stick at full throw).
+ * lleft lright lup ldown / rleft rright rup rdown (a stick at full throw;
+ * rright@40 for 40%).
  * Every entry is printed as it fires, so a run log says what was pressed when.
  *
  * RECOMP_PAD_LIVE=<file> is the same thing driven while the title runs: each
@@ -313,8 +314,9 @@ typedef struct {
     uint8_t digital;         /* report byte 2 */
     uint8_t analog;          /* bit n = report byte 4 + n */
     uint8_t pad;             /* which controller: "p2-a" is pad 1 */
-    uint8_t stick;           /* full deflection: 1 L-left 2 L-right 4 L-up
-                                8 L-down, then the same four for the right */
+    uint8_t stick;           /* 1 L-left 2 L-right 4 L-up 8 L-down, then the
+                                same four for the right */
+    uint8_t throw_pct;       /* the sticks' deflection, percent; 0 full */
     int announced;
 } PadStep;
 
@@ -331,8 +333,15 @@ static int same_word(const char *a, const char *b, size_t n)
 }
 
 static int pad_button_bits(const char *name, size_t n, uint8_t *dig,
-                           uint8_t *ana, uint8_t *stick)
+                           uint8_t *ana, uint8_t *stick, uint8_t *throw_pct)
 {
+    /* <stick>@<percent>: part throw */
+    const char *at = memchr(name, '@', n);
+    if (at) {
+        unsigned long pct = strtoul(at + 1, NULL, 10);
+        *throw_pct = (uint8_t)(pct > 100 ? 100 : pct);
+        n = (size_t)(at - name);
+    }
     /* Stick directions, for screens and games that read the stick and
      * ignore the d-pad: Burnout 3 steers and picks map locations with it. */
     static const struct { const char *name; uint8_t bit; } sk[] = {
@@ -392,7 +401,7 @@ static void pad_script_parse(const char *text)
         }
         for (;;) {
             size_t n = strcspn(b, "+:,\r\n ");
-            if (!pad_button_bits(b, n, &st.digital, &st.analog, &st.stick))
+            if (!pad_button_bits(b, n, &st.digital, &st.analog, &st.stick, &st.throw_pct))
                 fprintf(stderr, "  PAD: unknown button \"%.*s\"\n", (int)n, b);
             b += n;
             if (*b != '+')
@@ -540,7 +549,7 @@ static void pad_script_apply(int pad, uint8_t *out)
                 out[4 + j] = 0xFF;
         if (st->stick) {
             /* Axes at 12..19: LX LY RX RY, signed 16-bit, up positive. */
-            static const int16_t full = 32767;
+            const int16_t full = (int16_t)(st->throw_pct ? 32767 * st->throw_pct / 100 : 32767);
             int16_t ax[4];
             memcpy(ax, &out[12], sizeof ax);
             if (st->stick & 0x01) ax[0] = (int16_t)-full;
