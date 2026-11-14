@@ -607,3 +607,10 @@ typedef struct {
     unsigned fe_trapped_frames; /* frames that found FECTL trapped */
 } ApuIrqStats;
 extern ApuIrqStats apu_irq_stats;
+
+/* RECOMP_APU_SSL_LOG=<voice>|all: a timed line per stream-voice event (SSL
+ * programmed, a list finished, the voice dry and back) and per interrupt
+ * delivery, to set a title's refills against the voice's consumption. */
+bool apu_ssl_log_voice(unsigned v);
+bool apu_ssl_log_on(void);
+void apu_ssl_logf(const char *fmt, ...);

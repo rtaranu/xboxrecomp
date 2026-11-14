@@ -22,6 +22,7 @@
 #include "apu_state.h"
 #include "apu.h"
 #include "fpconv.h"
+#include <stdarg.h>
 
 /* #define DEBUG_MCPX */
 
@@ -30,6 +31,36 @@
 #else
 #define DPRINTF(fmt, ...) do { } while (0)
 #endif
+
+/* RECOMP_APU_SSL_LOG (see apu_state.h). */
+static int s_ssl_log = -2;      /* -2 unread, -1 off, 0xFFFF all, else voice */
+
+bool apu_ssl_log_on(void)
+{
+    if (s_ssl_log == -2) {
+        const char *e = getenv("RECOMP_APU_SSL_LOG");
+        s_ssl_log = !e || !*e || !strcmp(e, "0") ? -1
+                  : !strcmp(e, "all") ? 0xFFFF : atoi(e);
+    }
+    return s_ssl_log != -1;
+}
+
+bool apu_ssl_log_voice(unsigned v)
+{
+    return apu_ssl_log_on() && (s_ssl_log == 0xFFFF || (unsigned)s_ssl_log == v);
+}
+
+void apu_ssl_logf(const char *fmt, ...)
+{
+    va_list ap;
+    fprintf(stderr, "[SSL] %10.3f f%-8u t%-5lu ",
+            qemu_clock_get_us(QEMU_CLOCK_REALTIME) / 1000.0,
+            apu_irq_stats.se_frames, (unsigned long)GetCurrentThreadId());
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
 
 /* ============================================================
  * Voice list register table
@@ -238,6 +269,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                            selected_handle);
         }
 
+        if (apu_ssl_log_voice(selected_handle))
+            apu_ssl_logf("v%u on", selected_handle);
         voice_set_mask(d, (uint16_t)selected_handle, NV_PAVS_VOICE_PAR_OFFSET,
                        NV_PAVS_VOICE_PAR_OFFSET_CBO, 0);
         d->vp.ssl[selected_handle].ssl_seg = 0;
@@ -319,10 +352,15 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     }
 
     case NV1BA0_PIO_VOICE_OFF:
+        if (apu_ssl_log_voice(argument & NV1BA0_PIO_VOICE_OFF_HANDLE))
+            apu_ssl_logf("v%u off", argument & NV1BA0_PIO_VOICE_OFF_HANDLE);
         voice_off(d, (uint16_t)(argument & NV1BA0_PIO_VOICE_OFF_HANDLE));
         break;
 
     case NV1BA0_PIO_VOICE_PAUSE:
+        if (apu_ssl_log_voice(argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE))
+            apu_ssl_logf("v%u pause %d", argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE,
+                         (argument & NV1BA0_PIO_VOICE_PAUSE_ACTION) != 0);
         voice_set_mask(d, (uint16_t)(argument & NV1BA0_PIO_VOICE_PAUSE_HANDLE),
                        NV_PAVS_VOICE_PAR_STATE, NV_PAVS_VOICE_PAR_STATE_PAUSED,
                        (argument & NV1BA0_PIO_VOICE_PAUSE_ACTION) != 0);
@@ -466,6 +504,12 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
             (uint8_t)GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_COUNT);
+        if (apu_ssl_log_voice(current_voice))
+            apu_ssl_logf("v%d set A base %u count %u (playing %c%d)",
+                         current_voice, d->vp.ssl[current_voice].base[0],
+                         d->vp.ssl[current_voice].count[0],
+                         'A' + d->vp.ssl[current_voice].ssl_index,
+                         d->vp.ssl[current_voice].ssl_seg);
         break;
     }
     case NV1BA0_PIO_SET_VOICE_SSL_B: {
@@ -476,6 +520,12 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_BASE);
         d->vp.ssl[current_voice].count[ssl] =
             (uint8_t)GET_MASK(argument, NV1BA0_PIO_SET_VOICE_SSL_A_COUNT);
+        if (apu_ssl_log_voice(current_voice))
+            apu_ssl_logf("v%d set B base %u count %u (playing %c%d)",
+                         current_voice, d->vp.ssl[current_voice].base[1],
+                         d->vp.ssl[current_voice].count[1],
+                         'A' + d->vp.ssl[current_voice].ssl_index,
+                         d->vp.ssl[current_voice].ssl_seg);
         break;
     }
 
@@ -1122,6 +1172,21 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
     voice_set_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_STATE,
                    NV_PAVS_VOICE_PAR_STATE_NEW_VOICE, 0);
 
+    if (stream && apu_ssl_log_voice(v)) {
+        static uint8_t was_paused[MCPX_HW_MAX_VOICES];
+        static uint32_t paused_since[MCPX_HW_MAX_VOICES];
+        if (paused != was_paused[v]) {
+            if (paused)
+                paused_since[v] = apu_irq_stats.se_frames;
+            apu_ssl_logf("v%u %s on %c%d", v,
+                         paused ? "paused" : "playing",
+                         'A' + d->vp.ssl[v].ssl_index, d->vp.ssl[v].ssl_seg);
+            if (!paused)
+                apu_ssl_logf("v%u was paused %u frames", v,
+                             apu_irq_stats.se_frames - paused_since[v]);
+            was_paused[v] = paused;
+        }
+    }
     if (paused) return -1;
 
     if (stream) {
@@ -1140,6 +1205,20 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         page = d->vp.ssl[v].base[ssl_index] + ssl_seg;
         count = d->vp.ssl[v].count[ssl_index];
 
+        if (apu_ssl_log_voice(v)) {
+            static uint32_t dry_since[MCPX_HW_MAX_VOICES];
+            static uint8_t dry[MCPX_HW_MAX_VOICES];
+            if (count == 0 && !dry[v]) {
+                dry[v] = 1;
+                dry_since[v] = apu_irq_stats.se_frames;
+                apu_ssl_logf("v%d dry on %c", v, 'A' + ssl_index);
+            } else if (count != 0 && dry[v]) {
+                dry[v] = 0;
+                apu_ssl_logf("v%d back on %c after %u frames", v,
+                             'A' + ssl_index,
+                             apu_irq_stats.se_frames - dry_since[v]);
+            }
+        }
         if (count == 0) {
             voice_set_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
                            NV_PAVS_VOICE_PAR_OFFSET_CBO, 0);
@@ -1294,6 +1373,10 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                 /* Move to next segment */
             } else {
                 int next_index = (ssl_index + 1) % 2;
+                if (apu_ssl_log_voice(v))
+                    apu_ssl_logf("v%d done %c, next %c count %u", v,
+                                 'A' + ssl_index, 'A' + next_index,
+                                 d->vp.ssl[v].count[next_index]);
                 d->vp.ssl[v].ssl_index = next_index;
                 d->vp.ssl[v].ssl_seg = 0;
                 set_notify_status(d, v, MCPX_HW_NOTIFIER_SSLA_DONE + ssl_index,
