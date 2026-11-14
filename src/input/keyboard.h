@@ -120,6 +120,12 @@ void xbox_InputKeyboardBindings(struct InputBindings *b);
  * xbox_InputKeyboardState(). */
 int  xbox_InputKeyboardPoll(XBOX_INPUT_STATE *out);
 
+/* Non-zero while an overlay drawn on the game's window (a host-side
+ * settings menu) has the keyboard and mouse: the keys read as released and
+ * the mouse layer (RECOMP_MKB) lets go of the pointer. Pads are unaffected. */
+void xbox_InputSetOverlay(int on);
+int  xbox_InputOverlay(void);
+
 /* The map, row by row (tests, and the table in README.md). */
 enum { XBOX_KEY_BUTTON, XBOX_KEY_ANALOG, XBOX_KEY_AXIS };
 enum { XBOX_KEY_LX, XBOX_KEY_LY, XBOX_KEY_RX, XBOX_KEY_RY };

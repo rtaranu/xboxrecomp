@@ -30,6 +30,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "mkb_input.h"
+#include "keyboard.h"   /* xbox_InputOverlay */
 
 #include <windows.h>
 #include <stdio.h>
@@ -372,6 +373,16 @@ int mkb_merge(DWORD dwPort, XBOX_INPUT_STATE *pState)
 
     if (!s_active) {
         mkb_manage_cursor(0);
+        return 0;
+    }
+
+    /* An overlay menu has the pointer: show it, drop what moved meanwhile. */
+    if (xbox_InputOverlay()) {
+        mkb_manage_cursor(0);
+        InterlockedExchange(&s_dx, 0);
+        InterlockedExchange(&s_dy, 0);
+        InterlockedExchange(&s_wheel, 0);
+        InterlockedExchange(&s_mouse_btn, 0);
         return 0;
     }
 
