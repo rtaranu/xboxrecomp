@@ -25,6 +25,10 @@
  * thread and read only by the game's poll, one byte at a time, and a press
  * seen a poll late is indistinguishable from one made a poll later. */
 static volatile unsigned char s_key_down[256];
+static volatile int s_overlay;
+
+void xbox_InputSetOverlay(int on) { s_overlay = on != 0; }
+int  xbox_InputOverlay(void) { return s_overlay; }
 
 void xbox_InputKeySet(int vk, int down)
 {
@@ -169,7 +173,7 @@ void xbox_InputKeyboardState(XBOX_INPUT_STATE *out)
 
     /* One snapshot of the table, so a poll sees one set of keys. */
     for (int vk = 0; vk < INPUT_KEY_COUNT; vk++)
-        down[vk] = s_key_down[vk];
+        down[vk] = s_overlay ? 0 : s_key_down[vk];
     xbox_InputKeyboardBindings(&b);
 
     memset(out, 0, sizeof *out);
