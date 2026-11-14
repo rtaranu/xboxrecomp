@@ -276,7 +276,11 @@ static int apu_call_isr(void)
     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = context;
     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = kint;
     g_esp -= 4; *(uint32_t *)(g_apu_ram_ptr + g_esp) = 0xDEADBEEFu;
+    if (apu_ssl_log_on())
+        apu_ssl_logf("isr in, ISTS %08X", qatomic_read(&g_state->regs[NV_PAPU_ISTS]));
     { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+    if (apu_ssl_log_on())
+        apu_ssl_logf("isr out");
     {
         static unsigned n;
         if (n++ < 3) {
@@ -337,6 +341,8 @@ static void apu_deliver_irq(MCPXAPUState *d)
     if (xbox_IrqSafePointsOn()) {
         how = xbox_IrqPost(XBOX_IRQ_APU);
         if (how == XBOX_IRQ_POSTED) {
+            if (apu_ssl_log_on())
+                apu_ssl_logf("isr posted to the gate holder");
             qemu_mutex_lock(&d->lock);
             return;
         }
@@ -345,6 +351,8 @@ static void apu_deliver_irq(MCPXAPUState *d)
          * raised IRQL, which is when the single-CPU console could not have
          * taken the interrupt, then delivered anyway. */
         if (xbox_IrqlBlocksInterrupts() && ++held_off <= 50) {
+            if (apu_ssl_log_on())
+                apu_ssl_logf("isr held off (%u)", held_off);
             qemu_mutex_lock(&d->lock);
             return;
         }
@@ -429,6 +437,14 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
         break;
     case NV_PAPU_FECTL:
     case NV_PAPU_SECTL:
+        if (addr == NV_PAPU_FECTL && apu_ssl_log_on()
+                && (qatomic_read(&d->regs[addr]) & NV_PAPU_FECTL_FEMETHMODE)
+                   == NV_PAPU_FECTL_FEMETHMODE_TRAPPED
+                && ((uint32_t)val & NV_PAPU_FECTL_FEMETHMODE)
+                   != NV_PAPU_FECTL_FEMETHMODE_TRAPPED)
+            apu_ssl_logf("fe resumed");
+        if (addr == NV_PAPU_SECTL && apu_ssl_log_on())
+            apu_ssl_logf("SECTL %08X", (uint32_t)val);
         qatomic_set(&d->regs[addr], (uint32_t)val);
         /* Starting the APU has to start the frame thread.
          *
