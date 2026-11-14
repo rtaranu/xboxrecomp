@@ -94,6 +94,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_VBLANK[=paced]` | no vblanks | Raises vblanks: a ~50 Hz tick, or `paced` for the 60 Hz schedule. `0` or empty is off. | `kernel_bridge.c` |
 | `RECOMP_FLIP_PACING[=edge]` | off | Holds each flip to the vblank count. | `nv2a_pb_exec.c` |
 | `RECOMP_ACK_HOLD_SLEEP_US` | 500 | While a flip is held, the nv2a-ack loop sleeps this long between passes instead of spinning (max 2000). `0` spins as before. | `xbox_memory_layout.c` |
+| `RECOMP_KICK_HOLD_WAIT_US` | 200 | While a flip is held, a renderer hook in front of D3D's KickOff (`nv2a_pb_flip_hold_wait`) sleeps in steps of this long until the release, instead of the title spinning on the unacknowledged PFB flush (max 2000). `0` lets it spin. | `xbox_memory_layout.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
 | `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip. | `nv2a_pb_exec.c` |
 | `RECOMP_SWIZZLED_RT` | on | `0` stops rendering into swizzled render targets. | `nv2a_pb_exec.c` |
