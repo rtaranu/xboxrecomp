@@ -20,6 +20,7 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "platform/host_time.h"   /* xbox_HostSleepNs */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1449,6 +1450,26 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
     return (volatile uint32_t *)((char *)g_nv2a_memory + offset);
 }
 
+/* RECOMP_ACK_HOLD_SLEEP_US: how long the ack loop sleeps between passes
+ * while a flip is held (default 500; 0 keeps the Sleep(0) spin). Outside a
+ * hold every pass may answer a handshake the title is spinning on, so the
+ * loop only yields. During a hold it walks nothing and the PFB flush stays
+ * unacknowledged on purpose: the hold ends on the vblank count, so the spin
+ * kept a host core busy for the rest of every frame and bought nothing but
+ * up to one sleep of latency on the release. The passes that do continue
+ * (fences, DSP, counters, KeTickCount) keep sub-millisecond ones. */
+static uint64_t ack_hold_sleep_ns(void)
+{
+    static volatile long us = -1;   /* one reader: the ack thread */
+
+    if (us < 0) {
+        const char *e = getenv("RECOMP_ACK_HOLD_SLEEP_US");
+        long v = (e && *e) ? strtol(e, NULL, 10) : 500;
+        us = v < 0 ? 0 : v > 2000 ? 2000 : v;
+    }
+    return (uint64_t)us * 1000u;
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
@@ -1650,7 +1671,11 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
-        Sleep(0);  /* yield; the waiter is spinning on another core */
+        /* Asked again: a hold this pass began may have ended meanwhile. */
+        if (flip_held && ack_hold_sleep_ns() && nv2a_pb_exec_flip_poll())
+            xbox_HostSleepNs(ack_hold_sleep_ns());
+        else
+            Sleep(0);  /* yield; the waiter is spinning on another core */
     }
     return 0;
 }
