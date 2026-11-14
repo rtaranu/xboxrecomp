@@ -584,6 +584,8 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
             qatomic_or(&d->regs[NV_PAPU_ISTS], NV_PAPU_ISTS_FETINTSTS);
             d->set_irq = true;
             apu_irq_stats.traps++;
+            if (apu_ssl_log_voice(argument))
+                apu_ssl_logf("v%u idle trap", argument);
         }
         break;
 
