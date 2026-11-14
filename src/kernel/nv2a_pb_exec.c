@@ -4144,6 +4144,13 @@ int nv2a_pb_exec_flip_poll(void)
     return xbox_FlipHoldPoll(&s_flip_hold, c, now, ok);
 }
 
+/* 1 while a flip is held, from any thread: a read only (the ack loop alone
+ * polls and releases), so it may lag the release by a pass. */
+int nv2a_pb_exec_flip_held(void)
+{
+    return ((volatile XboxFlipHold *)&s_flip_hold)->held != 0;
+}
+
 /* The hold's line in the periodic [GPU] report, then reset. */
 static void flip_hold_report(void)
 {
