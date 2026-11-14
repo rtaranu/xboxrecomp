@@ -1472,6 +1472,33 @@ static uint64_t ack_hold_sleep_ns(void)
     return (uint64_t)us * 1000u;
 }
 
+/* RECOMP_KICK_HOLD_WAIT_US: see nv2a_pb_flip_hold_wait (default 200; 0
+ * returns at once, so the title spins in its kickoff as before). */
+static uint64_t kick_hold_wait_ns(void)
+{
+    static volatile long us = -1;
+
+    if (us < 0) {
+        const char *e = getenv("RECOMP_KICK_HOLD_WAIT_US");
+        long v = (e && *e) ? strtol(e, NULL, 10) : 200;
+        us = v < 0 ? 0 : v > 2000 ? 2000 : v;
+    }
+    return (uint64_t)us * 1000u;
+}
+
+void nv2a_pb_flip_hold_wait(void)
+{
+    extern int nv2a_pb_exec_flip_held(void);
+    uint64_t step = kick_hold_wait_ns(), start;
+
+    if (!step || !nv2a_pb_exec_flip_held())
+        return;
+    start = xbox_HostNowNs();
+    while (nv2a_pb_exec_flip_held()
+           && xbox_HostNowNs() - start < XBOX_FLIP_HOLD_MAX_NS)
+        xbox_HostSleepNs(step);
+}
+
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;

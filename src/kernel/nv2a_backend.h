@@ -156,4 +156,13 @@ void nv2a_pb_set_semaphore_target(uint32_t guest_va);
  * flips); clears, batches and the flip's copy to the window are skipped. */
 void nv2a_pb_set_draws_off(int off);
 
+/* For a hook in front of D3D's KickOff: sleep while a flip is held
+ * (RECOMP_FLIP_PACING), at most XBOX_FLIP_HOLD_MAX_NS. A held flip leaves
+ * the PFB flush KickOff spins on unacknowledged until the vblank, so a
+ * title entering KickOff then would spin a host core for the rest of the
+ * frame; waiting here first ends at the same release. Returns at once with
+ * no hold, or with RECOMP_KICK_HOLD_WAIT_US=0 (the sleep step, default
+ * 200 us). */
+void nv2a_pb_flip_hold_wait(void);
+
 #endif /* NV2A_BACKEND_H */
