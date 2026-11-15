@@ -266,6 +266,15 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
     d->regs[NV_PAPU_FEDECPARAM] = argument;
     unsigned int selected_handle, list;
 
+    if (method == NV1BA0_PIO_VOICE_ON || method == NV1BA0_PIO_VOICE_OFF ||
+            method == NV1BA0_PIO_VOICE_RELEASE || method == NV1BA0_PIO_VOICE_PAUSE) {
+        uint16_t cv = (uint16_t)(argument & NV1BA0_PIO_VOICE_OFF_HANDLE);
+        if (cv < MCPX_HW_MAX_VOICES) {
+            d->vp.last_cmd[cv] = (uint16_t)method;
+            d->vp.last_cmd_us[cv] = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        }
+    }
+
     switch (method) {
     case NV1BA0_PIO_VOICE_LOCK:
         voice_lock(d, (uint16_t)d->regs[NV_PAPU_FECV], argument & 1);
@@ -1809,6 +1818,75 @@ static void vp_trace_positions(MCPXAPUState *d)
                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
         }
     }
+}
+
+static const char *vp_cmd_name(uint16_t m)
+{
+    switch (m) {
+    case NV1BA0_PIO_VOICE_ON:      return "on";
+    case NV1BA0_PIO_VOICE_OFF:     return "off";
+    case NV1BA0_PIO_VOICE_RELEASE: return "release";
+    case NV1BA0_PIO_VOICE_PAUSE:   return "pause";
+    default:                       return "-";
+    }
+}
+
+static void vp_dump_voice(MCPXAPUState *d, const char *where, uint16_t v,
+                          int64_t now_us)
+{
+    uint32_t st = voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, 0xFFFFFFFF);
+    uint32_t fmt = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_FMT, 0xFFFFFFFF);
+    uint32_t ecnt = voice_get_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, 0xFFFFFFFF);
+
+    fprintf(stderr, "  %s v%u%s%s%s ea=%u/%u ef=%u/%u rr=%u%s%s cbo=%u ebo=%u last=%s",
+            where, (unsigned)v,
+            st & NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE ? " active" : " IDLE",
+            st & NV_PAVS_VOICE_PAR_STATE_PAUSED ? " PAUSED" : "",
+            d->vp.voice_locked[v] ? " locked" : "",
+            (st & NV_PAVS_VOICE_PAR_STATE_EACUR) >> 28, ecnt & 0xFFFF,
+            (st & NV_PAVS_VOICE_PAR_STATE_EFCUR) >> 24, ecnt >> 16,
+            voice_get_mask(d, v, NV_PAVS_VOICE_TAR_LFO_ENV,
+                           NV_PAVS_VOICE_TAR_LFO_ENV_EA_RELEASERATE),
+            fmt & NV_PAVS_VOICE_CFG_FMT_DATA_TYPE ? " stream" : "",
+            fmt & NV_PAVS_VOICE_CFG_FMT_LOOP ? " loop" : "",
+            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_OFFSET, NV_PAVS_VOICE_PAR_OFFSET_CBO),
+            voice_get_mask(d, v, NV_PAVS_VOICE_PAR_NEXT, NV_PAVS_VOICE_PAR_NEXT_EBO),
+            vp_cmd_name(d->vp.last_cmd[v]));
+    if (d->vp.last_cmd_us[v])
+        fprintf(stderr, " %.1f ms ago", (now_us - d->vp.last_cmd_us[v]) / 1000.0);
+    fputc('\n', stderr);
+}
+
+void mcpx_apu_vp_dump(MCPXAPUState *d, const char *why)
+{
+    static const char *const names[3] = { "2D", "3D", "MP" };
+    uint8_t listed[MCPX_HW_MAX_VOICES] = { 0 };
+    int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    fprintf(stderr, "[APU-VOICES] %s at %.3f ms: FECTL=%08X idle traps %s\n", why,
+            now_us / 1000.0, d->regs[NV_PAPU_FECTL],
+            d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE ? "on" : "OFF");
+    for (int list = 0; list < 3; list++) {
+        uint32_t h = d->regs[voice_list_regs[list].top];
+        for (int i = 0; h != 0xFFFF && i < MCPX_HW_MAX_VOICES; i++) {
+            uint16_t v = (uint16_t)h;
+            listed[v] = 1;
+            vp_dump_voice(d, names[list], v, now_us);
+            h = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
+                               NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
+        }
+    }
+    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++)
+        if (!listed[v] && voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_STATE,
+                                         NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE))
+            vp_dump_voice(d, "unlisted", (uint16_t)v, now_us);
+    fflush(stderr);
+}
+
+void mcpx_apu_debug_dump_voices(const char *why)
+{
+    if (g_state)
+        mcpx_apu_vp_dump(g_state, why);
 }
 
 /* RECOMP_APU_AUDIT=<seconds>: periodically, each voice in the 2D, 3D and MP
