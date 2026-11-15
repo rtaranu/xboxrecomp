@@ -474,4 +474,10 @@ void xbox_FramebufferWindowSetExternal(int on)
     (void)on;
 }
 
+int xbox_FramebufferWindowFullscreen(int on)
+{
+    (void)on;
+    return 0;
+}
+
 #endif /* !_WIN32 */

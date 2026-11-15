@@ -79,6 +79,10 @@ void  xbox_FramebufferWindowSetExternal(int on);
  * 0xAARRGGBB; its new frame's memory is the title's again then. One thread. */
 int   xbox_FramebufferOverlayState(void);
 void  xbox_FramebufferOverlay(uint32_t *rgb);
+/* Borderless fullscreen (F11, Alt+Enter): on 1 or 0 asks for it, -1 only
+ * asks. Returns whether the window is fullscreen now (a request lands on the
+ * window's thread, a moment later). */
+int   xbox_FramebufferWindowFullscreen(int on);
 
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit
