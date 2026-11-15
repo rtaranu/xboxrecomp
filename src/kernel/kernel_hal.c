@@ -1472,10 +1472,22 @@ VOID __stdcall xbox_AvSendTVEncoderOption(
          *
          * HDTV pack keeps 480p/720p available to titles that offer them;
          * NTSC-M and 60Hz are the North American retail default, and match
-         * the region reported by ExQueryNonVolatileSetting. */
-        *Result = AV_PACK_HDTV
-                | (AV_STANDARD_NTSC_M << AV_STANDARD_SHIFT)
-                | AV_REFRESH_60Hz;
+         * the region reported by ExQueryNonVolatileSetting.
+         *
+         * The kernel ORs in the dashboard's video flags above the pack and
+         * the standard (Cxbx-Reloaded's AvQueryAvCapabilities): D3D takes
+         * which of 480p, 720p and 1080i it may use from this word, and a
+         * title asking for a widescreen or HD mode the word lacks gets no
+         * device. */
+        {
+            ULONG v = 0, type, len;
+            if (xbox_ExQueryNonVolatileSetting(XC_VIDEO, &type, &v, sizeof v, &len) != STATUS_SUCCESS)
+                v = 0;
+            *Result = AV_PACK_HDTV
+                    | (AV_STANDARD_NTSC_M << AV_STANDARD_SHIFT)
+                    | AV_REFRESH_60Hz
+                    | (v & ~0xFFFFu);
+        }
         break;
 
     case AV_OPTION_QUERY_MODE:
