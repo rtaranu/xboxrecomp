@@ -1017,8 +1017,9 @@ static void bridge_NtClose(void)
 
 /* A new contiguous block gets the protection asked for. A title may make its
  * own blocks read-only (MmSetAddressProtect), free them, and get the same
- * pages back: MechAssault crashed writing a fresh buffer whose pages it had
- * marked PAGE_READONLY before freeing them. */
+ * pages back: MechAssault crashed zeroing a fresh buffer whose pages it had
+ * marked PAGE_READONLY before freeing them. The allocator makes the pages
+ * writable before it zeroes them; this applies the requested protection. */
 static void contig_protect(uint32_t xbox_va, uint32_t size, uint32_t prot)
 {
     if (xbox_va && size)
@@ -1116,13 +1117,14 @@ static void bridge_MmAllocateContiguousMemoryEx(void)
      */
     if (low && high >= low && (high - low + 1) <= size + 0x1000) {
         xbox_va = XBOX_PHYSICAL_MIRROR_BASE + low;
-        contig_protect(xbox_va, size, prot);
+        contig_protect(xbox_va, size, 0x04);   /* writable for the zeroing */
 
         /* The console hands out zeroed pages here, and titles rely on it:
          * pool headers and free-list roots are assumed clear, so whatever the
          * backing view happened to contain shows up later as structures that
          * are "allocated" but full of garbage. */
         memset((void *)((uintptr_t)xbox_va + g_xbox_mem_offset), 0, size);
+        contig_protect(xbox_va, size, prot);
         /* Keep the arena from handing the same pages to someone else. */
         xbox_ContiguousClaim(xbox_va, size);
 
