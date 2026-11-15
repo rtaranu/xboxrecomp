@@ -430,6 +430,8 @@ typedef struct MCPXAPUVPState {
     float sample_buf[NUM_SAMPLES_PER_FRAME][2];
     volatile uint8_t voice_locked[MCPX_HW_MAX_VOICES];
     volatile LONG voice_spin[MCPX_HW_MAX_VOICES];   /* see voice_spin_lock */
+    uint16_t last_cmd[MCPX_HW_MAX_VOICES];   /* last VOICE_ON/OFF/RELEASE/PAUSE */
+    int64_t last_cmd_us[MCPX_HW_MAX_VOICES]; /* and when (mcpx_apu_vp_dump) */
 
     struct {
         int current_entry;
@@ -543,6 +545,12 @@ void mcpx_apu_vp_init(MCPXAPUState *d);
 void mcpx_apu_vp_finalize(MCPXAPUState *d);
 void mcpx_apu_vp_frame(MCPXAPUState *d, float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME]);
 void mcpx_apu_vp_reset(MCPXAPUState *d);
+/* Every voice the 2D, 3D and MP lists reach, and any active voice none
+ * does: state, envelopes, offsets and the last voice command with its age.
+ * A diagnostic; it reads without the APU lock. */
+void mcpx_apu_vp_dump(MCPXAPUState *d, const char *why);
+/* The same for the running APU (g_state), for a title's own probes. */
+void mcpx_apu_debug_dump_voices(const char *why);
 
 /* DSP functions (stubbed) */
 void mcpx_apu_dsp_init(MCPXAPUState *d);
