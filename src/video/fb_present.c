@@ -246,6 +246,9 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws)
 /* Alt+Enter / F11: borderless fullscreen on the window's monitor, and back.
  * (DXGI's own Alt+Enter, exclusive mode at the frame's 640x480, is off --
  * gpu_present.c; both presenters letterbox to any size.) */
+static volatile LONG s_full;
+#define WM_FB_FULLSCREEN (WM_APP + 1)   /* wParam: 1 fullscreen, 0 windowed */
+
 static void fb_toggle_fullscreen(HWND h)
 {
     static int full;
@@ -269,6 +272,7 @@ static void fb_toggle_fullscreen(HWND h)
                      saved.bottom - saved.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_SHOWWINDOW);
         full = 0;
     }
+    InterlockedExchange(&s_full, full);
 }
 
 static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -282,6 +286,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     if (m == WM_SYSKEYDOWN && w == VK_RETURN)
         return 0;                       /* auto-repeat of Alt+Enter */
+    if (m == WM_FB_FULLSCREEN) {
+        if ((w != 0) != (s_full != 0))
+            fb_toggle_fullscreen(h);
+        return 0;
+    }
     switch (m) {
     case WM_CLOSE:
     case WM_DESTROY:
@@ -655,6 +664,13 @@ void *xbox_FramebufferWindowHandle(void)
 void xbox_FramebufferWindowSetExternal(int on)
 {
     InterlockedExchange(&s_fb_external, on ? 1 : 0);
+}
+
+int xbox_FramebufferWindowFullscreen(int on)
+{
+    if (on >= 0 && s_fb_hwnd)
+        PostMessageA(s_fb_hwnd, WM_FB_FULLSCREEN, on ? 1 : 0, 0);
+    return (int)s_full;
 }
 
 void xbox_FramebufferWindowStart(void)

@@ -72,6 +72,10 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws);
  * memory; it still pumps messages and updates the title bar. */
 void *xbox_FramebufferWindowHandle(void);
 void  xbox_FramebufferWindowSetExternal(int on);
+/* Borderless fullscreen (F11, Alt+Enter): on 1 or 0 asks for it, -1 only
+ * asks. Returns whether the window is fullscreen now (a request lands on the
+ * window's thread, a moment later). */
+int   xbox_FramebufferWindowFullscreen(int on);
 
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit
