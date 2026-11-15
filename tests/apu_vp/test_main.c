@@ -14,6 +14,8 @@
  *     format and copied the left result into every bin.
  *   - ssl_*: a stream voice stayed on an empty segment list for good and
  *     replayed a list it had played (RECOMP_APU_SSL_ADVANCE).
+ *   - voice_fields_*: voice_set_mask was a plain read-modify-write, so the
+ *     frame thread's envelope write could put back a VOICE_OFF's active bit.
  *
  * Run with: ctest --test-dir <build> */
 #include "../../src/apu/apu_vp.c"
@@ -332,6 +334,48 @@ static void ssl_empty_list_passes_on(void)
           "default: the voice left the empty list");
 }
 
+/* voice_set_mask from two threads on two fields of one word, as the frame
+ * thread's envelope and a title's VOICE_OFF share PAR_STATE: each thread
+ * counts its own half up, so a write that puts back the other half's old
+ * value shows as a count that comes up short. */
+#define FIELD_RACE_N 300000
+static MCPXAPUState s_race_d;
+static volatile LONG s_race_go;
+
+static DWORD WINAPI field_race_thread(LPVOID arg)
+{
+    uint32_t mask = (uint32_t)(uintptr_t)arg;
+    while (!s_race_go)
+        ;
+    for (int i = 0; i < FIELD_RACE_N; i++) {
+        uint32_t n = voice_get_mask(&s_race_d, 5, NV_PAVS_VOICE_PAR_STATE, mask);
+        voice_set_mask(&s_race_d, 5, NV_PAVS_VOICE_PAR_STATE, mask, (n + 1) & 0xFFFF);
+    }
+    return 0;
+}
+
+static void voice_fields_survive_concurrent_writes(void)
+{
+    HANDLE t[2];
+
+    memset(s_ram, 0, RAM_SIZE);
+    memset(&s_race_d, 0, sizeof(s_race_d));
+    s_race_d.regs[NV_PAPU_VPVADDR] = VOICE_BASE;
+    s_race_go = 0;
+    t[0] = CreateThread(NULL, 0, field_race_thread, (LPVOID)(uintptr_t)0x0000FFFFu, 0, NULL);
+    t[1] = CreateThread(NULL, 0, field_race_thread, (LPVOID)(uintptr_t)0xFFFF0000u, 0, NULL);
+    InterlockedExchange(&s_race_go, 1);
+    WaitForMultipleObjects(2, t, TRUE, INFINITE);
+    CloseHandle(t[0]);
+    CloseHandle(t[1]);
+
+    uint32_t lo = voice_get_mask(&s_race_d, 5, NV_PAVS_VOICE_PAR_STATE, 0x0000FFFFu);
+    uint32_t hi = voice_get_mask(&s_race_d, 5, NV_PAVS_VOICE_PAR_STATE, 0xFFFF0000u);
+    CHECK(lo == (FIELD_RACE_N & 0xFFFF) && hi == (FIELD_RACE_N & 0xFFFF),
+          "a field write lost the other field's update: low %u, high %u, expected %u each",
+          lo, hi, FIELD_RACE_N & 0xFFFF);
+}
+
 int main(void)
 {
     s_ram = (uint8_t *)calloc(1, RAM_SIZE);
@@ -343,6 +387,7 @@ int main(void)
     gain_ramps_across_a_frame();
     mono_hrtf_keeps_binaural_channels();
     ssl_empty_list_passes_on();
+    voice_fields_survive_concurrent_writes();
 
     free(s_ram);
     if (s_failures) {
@@ -352,6 +397,6 @@ int main(void)
     puts("PASS: every ADPCM block count the descriptor can name decodes, "
          "VOICE_LOCK waits only for its own voice, and volume "
          "changes ramp across a frame; mono HRTF keeps both output channels; "
-         "a stream voice passes through an empty segment list.");
+         "a stream voice passes through an empty segment list; voice fields survive concurrent writes.");
     return 0;
 }
