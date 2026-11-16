@@ -4283,6 +4283,9 @@ int xbox_HeapReclaimEnabled(void)
     return on;
 }
 
+/* Bytes in live blocks, for the [MEM] report. Changed under g_heap_lock. */
+static uint32_t g_heap_live_bytes;
+
 /* Insert a free block at index `at`, keeping address order. Reuses an empty
  * slot (size 0, left behind by coalescing) when one is already there. */
 static int heap_insert_free(int at, uint32_t addr, uint32_t size)
@@ -4333,6 +4336,7 @@ static uint32_t heap_carve_block(int i, uint32_t size, uint32_t alignment)
     g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
     if (back && !heap_insert_free(i + 1, start + size, back))
         g_heap_blocks[i].size += back;   /* table full: keep it attached */
+    g_heap_live_bytes += g_heap_blocks[i].size;
     memset((void *)((uintptr_t)start + g_memory_offset), 0, size);
     return start;
 }
@@ -4552,6 +4556,35 @@ static void contig_unlock(void)
     InterlockedExchange(&g_contig_lock, 0);
 }
 
+/* [MEM]: the most the title has held at once, against the console's RAM.
+ *
+ * Everything below the heap (the image, the toolkit's region and the main
+ * stack), the heap's live blocks and the contiguous pages in use. The heap
+ * and the window are separate storage here, so the sum can pass what the
+ * console has without anything failing; this says whether it did. One line
+ * each time the peak has grown by another megabyte, so the last one in a log
+ * is the record. Called with no lock held; the counters are read as they are. */
+static void mem_peak_check(void)
+{
+    static volatile LONG reported_kb;
+    uint32_t heap_kb = g_heap_live_bytes / 1024;
+    uint32_t contig_kb = g_contig_pages_in_use * (CONTIG_PAGE / 1024);
+    uint32_t fixed_kb = XBOX_HEAP_BASE / 1024;
+    LONG total_kb = (LONG)(fixed_kb + heap_kb + contig_kb);
+    LONG seen = reported_kb;
+
+    if (total_kb < seen + 1024
+            || InterlockedCompareExchange(&reported_kb, total_kb, seen) != seen)
+        return;
+    fprintf(stderr, "  [MEM] peak %u KB of %u KB RAM: below the heap %u KB "
+            "(main stack %u KB of it), heap live %u KB, contiguous %u KB; "
+            "heap extent %u KB\n",
+            (unsigned)total_kb, (unsigned)(g_xbox_total_ram / 1024), fixed_kb,
+            (unsigned)(XBOX_STACK_SIZE / 1024), heap_kb, contig_kb,
+            g_heap_next ? (g_heap_next - XBOX_HEAP_BASE) / 1024 : 0);
+    fflush(stderr);
+}
+
 /* Usage over time, at most a line per 2 MB of movement or per 1024 calls --
  * enough to see the arena breathe without a line per texture. Lock held. */
 static void contig_report(const char *what, uint32_t va, uint32_t pages)
@@ -4697,6 +4730,7 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
                        (size_t)n * CONTIG_PAGE, PAGE_READWRITE, &old);
         memset((void *)((uintptr_t)result + g_memory_offset), 0,
                (size_t)n * CONTIG_PAGE);
+        mem_peak_check();
     }
     return result;
 }
@@ -4733,6 +4767,7 @@ void xbox_ContiguousClaim(uint32_t va, uint32_t size)
         contig_report("claim", XBOX_CONTIG_BASE + q * CONTIG_PAGE, run);
     }
     contig_unlock();
+    mem_peak_check();
 }
 
 /* Release a block (RECOMP_HEAP_RECLAIM only). Returns 1 if va is in the
@@ -5022,6 +5057,8 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment)
     AcquireSRWLockExclusive(&g_heap_lock);
     r = heap_alloc_locked(size, alignment);
     ReleaseSRWLockExclusive(&g_heap_lock);
+    if (r)
+        mem_peak_check();
     return r;
 }
 
@@ -5078,6 +5115,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
             }
             g_heap_blocks[i].free = 0; g_heap_blocks[i].named = 0;
             result = g_heap_blocks[i].addr;
+            g_heap_live_bytes += g_heap_blocks[i].size;
             memset((void *)((uintptr_t)result + g_memory_offset), 0, size);
             return result;
         }
@@ -5123,6 +5161,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
     }
 
     g_heap_next = result + size;
+    g_heap_live_bytes += size;
 
     /* Zero-fill the allocated block (Xbox memory is always zeroed) */
     memset((void *)((uintptr_t)result + g_memory_offset), 0, size);
@@ -5201,6 +5240,7 @@ void xbox_HeapFree(uint32_t xbox_va)
             continue;
         }
         g_heap_blocks[i].free = 1; g_heap_blocks[i].named = 0;
+        g_heap_live_bytes -= g_heap_blocks[i].size;
         if (++matched % 512 == 0) {
             fprintf(stderr, "  [HEAP] frees=%d matched=%d blocks=%d\n",
                     frees, matched, g_heap_block_count);
