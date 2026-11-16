@@ -1290,6 +1290,7 @@ static void bridge_NtAllocateVirtualMemory(void)
             fprintf(stderr, "  [KERNEL] → MEM_COMMIT on existing region 0x%08X, no-op\n", base_hint);
             fflush(stderr);
         }
+        xbox_HeapNoteCommit(base_hint, size, 1);   /* for the [MEM] report */
         g_eax = 0; /* STATUS_SUCCESS */
         return;
     }
@@ -1322,6 +1323,7 @@ static void bridge_NtAllocateVirtualMemory(void)
      * on a 4 KB boundary straddles two slots and frees hit the wrong pool. */
     uint32_t va_align = base_hint ? 4096u : 0x10000u;
     uint32_t xbox_va = xbox_HeapAlloc(size, va_align);
+    int from_heap = xbox_va != 0;
     if (!xbox_va && (alloc_type & 0x2000) && !(alloc_type & 0x1000)) {
         /* A pure reservation too big for the heap. Take it from the mapped
          * space above RAM, where it costs no heap and the pages are distinct.
@@ -1353,12 +1355,17 @@ static void bridge_NtAllocateVirtualMemory(void)
                     size, want);
             fflush(stderr);
             size = want;
+            from_heap = 1;
         }
     }
     if (!xbox_va) {
         g_eax = 0xC0000017u; /* STATUS_NO_MEMORY */
         return;
     }
+    /* Reserved, not committed: the heap backs it anyway, and the [MEM] report
+     * leaves it out until the title commits it. */
+    if (from_heap && (alloc_type & 0x3000) == 0x2000)
+        xbox_HeapNoteReserve(xbox_va, size);
 
     /* Write back the allocated address and actual size */
     if (base_ptr) BRIDGE_MEM32(base_ptr) = xbox_va;
@@ -1585,8 +1592,10 @@ static void bridge_free_guest_pages(uint32_t base_ptr, uint32_t size_ptr,
         if (left && end - page_base > left)
             end = page_base + left;
         size = end - page_base;
-        if (size)
+        if (size) {
             memset(XBOX_TO_NATIVE(page_base), 0, size);
+            xbox_HeapNoteCommit(page_base, size, 0);
+        }
         decommits++;
         decommit_bytes += size;
     }
@@ -1662,6 +1671,7 @@ static void bridge_NtFreeVirtualMemory(void)
                 if (xbox_HeapBlockSize(page_base) != left + (vm_base - page_base))
                     page_base = vm_base;
                 memset(XBOX_TO_NATIVE(page_base), 0, (size_t)(end - page_base));
+                xbox_HeapNoteCommit(page_base, (uint32_t)(end - page_base), 0);
                 BRIDGE_MEM32(base_ptr) = page_base;
                 BRIDGE_MEM32(size_ptr) = (uint32_t)(end - page_base);
             }
