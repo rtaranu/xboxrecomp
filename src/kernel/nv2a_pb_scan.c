@@ -25,6 +25,11 @@
 #include <stddef.h>   /* ptrdiff_t */
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>          /* LONG */
+#else
+#include "platform/xbox_winnt.h"
+#endif
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
 
@@ -63,6 +68,10 @@ static int s_scan_enabled = -1;
  * words while executing, so kickoffs are answered mid-walk. */
 extern void xbox_Nv2aAckBusyBits(void);
 static uint32_t s_ack_tick;
+/* An announced kickoff (xbox_memory_layout.c): its flush is answered at the
+ * next word, not the next 256. */
+extern volatile LONG g_nv2a_kick_waiting;
+extern void xbox_Nv2aKickAck(void);
 
 /* Either switch, read once. The answer "not set" has to be cached as well as
  * "set": this runs on every pass of the NV2A poll loop, and on the default
@@ -348,6 +357,8 @@ void nv2a_pb_scan(uint32_t put_phys)
         /* Keep answering kickoffs while executing; see xbox_Nv2aAckBusyBits. */
         if (s_exec_enabled && (++s_ack_tick & 0xFFu) == 0)
             xbox_Nv2aAckBusyBits();
+        if (g_nv2a_kick_waiting)
+            xbox_Nv2aKickAck();
 
         if (s_get >= PB_RAM_BYTES) {
             s_get = put, s_pend_left = 0;
@@ -488,6 +499,10 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
         uint32_t w = *(const uint32_t *)(mem + va);
         va += 4;
         words++;
+        /* A kickoff announced while this walk runs: answer its flush now,
+         * not when the walk ends (tens of us for a busy segment). */
+        if (g_nv2a_kick_waiting)
+            xbox_Nv2aKickAck();
 
         if ((w & 3u) == 1u || (w & 0xE0000003u) == 0x20000000u) {
             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
@@ -527,6 +542,8 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                     exec_word(subch, m, *(const uint32_t *)(mem + va));
                 va += 4;
                 words++;
+                if (g_nv2a_kick_waiting)
+                    xbox_Nv2aKickAck();
             }
             continue;
         }
