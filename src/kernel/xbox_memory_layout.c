@@ -1482,6 +1482,7 @@ volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
 #define PGRAPH_INTR_OFF        0x100u
 #define PGRAPH_NSOURCE_OFF     0x108u
 #define PGRAPH_INTR_EN_OFF     0x140u
+#define PGRAPH_FIFO_OFF        0x720u
 #define PGRAPH_TRAPPED_ADDR    0x704u
 #define PGRAPH_TRAPPED_DATA    0x708u
 #define PGRAPH_INTR_NOTIFY     (1u << 0)
@@ -1496,19 +1497,28 @@ static HANDLE g_pgraph_acked;
 static RECOMP_TLS int s_pg_stepping;
 static RECOMP_TLS uint32_t s_pg_intr_before;
 static RECOMP_TLS int s_pg_intr_write;
+static volatile LONG g_pgraph_fifo_gate;      /* the FIFO was open at the raise */
 
 #define PG_REG(off) (*(volatile uint32_t *)(g_pgraph_page + (off)))
 
-/* PGRAPH_INTR has just changed to v: PMC_INTR_0 follows, and an empty one is
- * the acknowledgement the GPU thread waits for. */
+/* The trap is over once PGRAPH_INTR is empty and the title has let the FIFO
+ * into PGRAPH again. Its handler closes NV_PGRAPH_FIFO for the whole
+ * service and reads what the pushbuffer left in the registers after the
+ * acknowledgement: a walker resumed at the acknowledgement overwrites them
+ * with the next frame's. */
+static int pgraph_trap_over(void)
+{
+    return !PG_REG(PGRAPH_INTR_OFF)
+           && (!g_pgraph_fifo_gate || (PG_REG(PGRAPH_FIFO_OFF) & 1));
+}
+
+/* PGRAPH_INTR has just changed to v: PMC_INTR_0 follows. */
 static void pgraph_intr_settled(uint32_t v)
 {
     volatile LONG *pmc = (volatile LONG *)((char *)g_nv2a_memory + NV2A_ACK_PMC_INTR_0);
 
-    if (v)
-        return;
-    InterlockedAnd(pmc, (LONG)~PMC_INTR_PGRAPH);
-    SetEvent(g_pgraph_acked);
+    if (!v)
+        InterlockedAnd(pmc, (LONG)~PMC_INTR_PGRAPH);
 }
 
 static LONG CALLBACK pgraph_write_veh(PEXCEPTION_POINTERS ep)
@@ -1524,6 +1534,8 @@ static LONG CALLBACK pgraph_write_veh(PEXCEPTION_POINTERS ep)
             PG_REG(PGRAPH_INTR_OFF) = v;
             pgraph_intr_settled(v);
         }
+        if (pgraph_trap_over())
+            SetEvent(g_pgraph_acked);
         VirtualProtect(g_pgraph_page, 0x1000, PAGE_READONLY, &old);
         LeaveCriticalSection(&g_pgraph_cs);
         ep->ContextRecord->EFlags &= ~0x100u;
@@ -1605,6 +1617,7 @@ int xbox_Nv2aPgraphRaise(uint32_t trapped_addr, uint32_t data)
     PG_REG(PGRAPH_TRAPPED_ADDR) = trapped_addr;
     PG_REG(PGRAPH_TRAPPED_DATA) = data;
     PG_REG(PGRAPH_NSOURCE_OFF) = PGRAPH_NSOURCE_NOTIFY;
+    InterlockedExchange(&g_pgraph_fifo_gate, PG_REG(PGRAPH_FIFO_OFF) & 1);
     PG_REG(PGRAPH_INTR_OFF) |= bit;
     ResetEvent(g_pgraph_acked);
     VirtualProtect(g_pgraph_page, 0x1000, PAGE_READONLY, &old);
@@ -1623,7 +1636,7 @@ int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms)
     /* Asked again every 2 ms: a raise that found the ISR masked stays
      * latched for the DPC, which may have finished its pass just before. */
     for (waited = 0; waited < timeout_ms; waited += 2) {
-        if (!PG_REG(PGRAPH_INTR_OFF))
+        if (pgraph_trap_over())
             return 1;
         /* This is the walker's thread, which answers D3D's kickoffs
          * between commands; a title kicking off meanwhile waits on it. */
@@ -1639,7 +1652,7 @@ int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms)
     LeaveCriticalSection(&g_pgraph_cs);
     pgraph_intr_settled(0);
     if (InterlockedIncrement(&giveups) <= 3) {
-        fprintf(stderr, "  [GPU] trap not acknowledged in %u ms; cleared\n",
+        fprintf(stderr, "  [GPU] trap not serviced in %u ms; cleared\n",
                 timeout_ms);
         fflush(stderr);
     }
