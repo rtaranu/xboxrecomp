@@ -2044,6 +2044,11 @@ ptrdiff_t g_xbox_mem_offset = 0;
 uint32_t g_xbox_image_lo = 0;
 uint32_t g_xbox_image_hi = 0;
 
+/* Bytes of the image in its loaded sections (whole pages), and the part of
+ * that in sections flagged preload; the console loads the others only when
+ * the title asks. For the [MEM] report. */
+static uint32_t g_image_bytes, g_image_preload_bytes;
+
 /* Toolkit region placement (xbox_memory_layout.h). The initial values are the
  * small-image layout; xbox_MemoryLayoutInit recomputes them from the image. */
 uint32_t g_xbox_region_base = XBOX_REGION_MIN;
@@ -3313,6 +3318,13 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 g_xbox_image_lo = sec_va;
             if (sec_va + sec_vsize > g_xbox_image_hi)
                 g_xbox_image_hi = sec_va + sec_vsize;
+            {
+                uint32_t bytes = ((sec_va + sec_vsize + 0xFFFu) & ~0xFFFu)
+                               - (sec_va & ~0xFFFu);
+                g_image_bytes += bytes;
+                if (*(const DWORD *)(sh + SECTHDR_FLAGS) & 0x00000002u)  /* PRELOAD */
+                    g_image_preload_bytes += bytes;
+            }
 
             /* Executable sections define the range indirect calls may target.
              * XBE section flag 0x04 is EXECUTABLE. */
@@ -4276,6 +4288,61 @@ int xbox_HeapReclaimEnabled(void)
 /* Bytes in live blocks, for the [MEM] report. Changed under g_heap_lock. */
 static uint32_t g_heap_live_bytes;
 
+/* Address space a title reserved and has not committed
+ * (NtAllocateVirtualMemory with MEM_RESERVE alone). The heap backs it at once,
+ * so it is in a live block, but on the console it costs no memory until it is
+ * committed, and the [MEM] report leaves it out. One byte per page: 1 reserved,
+ * 2 committed inside a reservation, 0 anything else. Under g_heap_lock. */
+#define HEAP_STATE_PAGES (1u << 18)        /* the first 1 GB of guest addresses */
+static uint8_t  g_heap_page_state[HEAP_STATE_PAGES];
+static uint32_t g_heap_reserved_bytes;     /* reserved and not committed */
+
+/* The whole pages of [va, va + size) are now a reservation. */
+void xbox_HeapNoteReserve(uint32_t va, uint32_t size)
+{
+    uint64_t p = ((uint64_t)va + 0xFFFu) >> 12, end = ((uint64_t)va + size) >> 12;
+
+    AcquireSRWLockExclusive(&g_heap_lock);
+    for (; p < end && p < HEAP_STATE_PAGES; p++) {
+        if (g_heap_page_state[p] != 1)
+            g_heap_reserved_bytes += 4096;
+        g_heap_page_state[p] = 1;
+    }
+    ReleaseSRWLockExclusive(&g_heap_lock);
+}
+
+/* Pages of a reservation touched by [va, va + size) were committed (1) or
+ * decommitted (0). Pages outside a reservation are left alone. */
+void xbox_HeapNoteCommit(uint32_t va, uint32_t size, int commit)
+{
+    uint64_t p = (uint64_t)va >> 12, end = ((uint64_t)va + size + 0xFFFu) >> 12;
+
+    AcquireSRWLockExclusive(&g_heap_lock);
+    for (; p < end && p < HEAP_STATE_PAGES; p++) {
+        if (commit && g_heap_page_state[p] == 1) {
+            g_heap_page_state[p] = 2;
+            g_heap_reserved_bytes -= 4096;
+        } else if (!commit && g_heap_page_state[p] == 2) {
+            g_heap_page_state[p] = 1;
+            g_heap_reserved_bytes += 4096;
+        }
+    }
+    ReleaseSRWLockExclusive(&g_heap_lock);
+}
+
+/* A block was freed: its whole pages are no longer a reservation. Caller
+ * holds g_heap_lock. */
+static void heap_forget_reservation(uint32_t va, uint32_t size)
+{
+    uint64_t p = ((uint64_t)va + 0xFFFu) >> 12, end = ((uint64_t)va + size) >> 12;
+
+    for (; p < end && p < HEAP_STATE_PAGES; p++) {
+        if (g_heap_page_state[p] == 1)
+            g_heap_reserved_bytes -= 4096;
+        g_heap_page_state[p] = 0;
+    }
+}
+
 /* Insert a free block at index `at`, keeping address order. Reuses an empty
  * slot (size 0, left behind by coalescing) when one is already there. */
 static int heap_insert_free(int at, uint32_t addr, uint32_t size)
@@ -4548,29 +4615,38 @@ static void contig_unlock(void)
 
 /* [MEM]: the most the title has held at once, against the console's RAM.
  *
- * Everything below the heap (the image, the toolkit's region and the main
- * stack), the heap's live blocks and the contiguous pages in use. The heap
- * and the window are separate storage here, so the sum can pass what the
- * console has without anything failing; this says whether it did. One line
- * each time the peak has grown by another megabyte, so the last one in a log
- * is the record. Called with no lock held; the counters are read as they are. */
+ * What the console would spend pages on: the image's sections, the heap's
+ * live blocks less what is only reserved, and the contiguous pages in use.
+ * The heap and the window are separate storage here, so the sum can pass
+ * what the console has without anything failing; this says whether it did.
+ * Left out, and named in the line: reserved address space, and the toolkit's
+ * own main stack (far larger than the console's). Spawned threads' stacks
+ * are in the heap figure at the toolkit's size.
+ *
+ * One line each time the peak has grown by another megabyte, so the last one
+ * in a log is the record. Called with no lock held; the counters are read as
+ * they are. */
 static void mem_peak_check(void)
 {
     static volatile LONG reported_kb;
-    uint32_t heap_kb = g_heap_live_bytes / 1024;
+    uint32_t live = g_heap_live_bytes, reserved = g_heap_reserved_bytes;
+    uint32_t heap_kb = (live > reserved ? live - reserved : 0) / 1024;
     uint32_t contig_kb = g_contig_pages_in_use * (CONTIG_PAGE / 1024);
-    uint32_t fixed_kb = XBOX_HEAP_BASE / 1024;
-    LONG total_kb = (LONG)(fixed_kb + heap_kb + contig_kb);
+    uint32_t image_kb = g_image_bytes / 1024;
+    LONG total_kb = (LONG)(image_kb + heap_kb + contig_kb);
     LONG seen = reported_kb;
 
     if (total_kb < seen + 1024
             || InterlockedCompareExchange(&reported_kb, total_kb, seen) != seen)
         return;
-    fprintf(stderr, "  [MEM] peak %u KB of %u KB RAM: below the heap %u KB "
-            "(main stack %u KB of it), heap live %u KB, contiguous %u KB; "
-            "heap extent %u KB\n",
-            (unsigned)total_kb, (unsigned)(g_xbox_total_ram / 1024), fixed_kb,
-            (unsigned)(XBOX_STACK_SIZE / 1024), heap_kb, contig_kb,
+    fprintf(stderr, "  [MEM] peak %u KB of %u KB RAM: image %u KB (%u KB "
+            "preloaded), heap committed %u KB (%d thread stacks of %u KB in "
+            "it), contiguous %u KB. Not counted: %u KB reserved, the "
+            "toolkit's %u KB main stack. Heap extent %u KB\n",
+            (unsigned)total_kb, (unsigned)(g_xbox_total_ram / 1024), image_kb,
+            g_image_preload_bytes / 1024, heap_kb, g_thread_stacks_used,
+            XBOX_THREAD_STACK_SIZE / 1024, contig_kb, reserved / 1024,
+            (unsigned)(XBOX_STACK_SIZE / 1024),
             g_heap_next ? (g_heap_next - XBOX_HEAP_BASE) / 1024 : 0);
     fflush(stderr);
 }
@@ -5227,6 +5303,7 @@ void xbox_HeapFree(uint32_t xbox_va)
         }
         g_heap_blocks[i].free = 1; g_heap_blocks[i].named = 0;
         g_heap_live_bytes -= g_heap_blocks[i].size;
+        heap_forget_reservation(g_heap_blocks[i].addr, g_heap_blocks[i].size);
         if (++matched % 512 == 0) {
             fprintf(stderr, "  [HEAP] frees=%d matched=%d blocks=%d\n",
                     frees, matched, g_heap_block_count);

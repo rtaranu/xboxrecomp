@@ -549,6 +549,15 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 void xbox_HeapFree(uint32_t xbox_va);
 
 /**
+ * Bookkeeping for the [MEM] report only; neither changes what the heap does.
+ * NoteReserve: [va, va + size) of a heap block is address space the title
+ * reserved without committing. NoteCommit: the title committed (1) or
+ * decommitted (0) pages of such a reservation. Freeing the block clears both.
+ */
+void xbox_HeapNoteReserve(uint32_t va, uint32_t size);
+void xbox_HeapNoteCommit(uint32_t va, uint32_t size, int commit);
+
+/**
  * Bytes remaining in the heap block containing this guest address, or 0 if the
  * heap never handed it out. Backs MmQueryAllocationSize and
  * ExQueryPoolBlockSize -- the host cannot answer either, since VirtualQuery on
