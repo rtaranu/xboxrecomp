@@ -68,6 +68,9 @@ int nv2a_pb_exec_run(uint32_t method, const uint32_t *p, uint32_t n)
 }
 void nv2a_pb_exec_report(void) {}
 void xbox_Nv2aAckBusyBits(void) {}
+/* An announced kickoff: none here. */
+volatile int32_t g_nv2a_kick_waiting;
+void xbox_Nv2aKickAck(void) {}
 void nv2a_pb_exec_walk_begin(void) {}       /* the flip hold's vblank sample */
 
 void nv2a_pb_resync(uint32_t get_phys);

@@ -1486,23 +1486,89 @@ static uint64_t kick_hold_wait_ns(void)
     return (uint64_t)us * 1000u;
 }
 
+extern int nv2a_pb_exec_flip_held(void);
+
+/* A kickoff on its way: set just before D3D's KickOff, which sets the PFB
+ * flush bit and spins until the GPU clears it. Cleared only by the ack
+ * pass, each kickoff waited for the next pass: about 40 us in MechAssault,
+ * at 29 kickoffs a frame a tenth of its main thread, and longer when the
+ * ack thread's Sleep(0) had given its core to another process. While this
+ * is set, the ack thread and the walker answer the flush as soon as it
+ * appears. */
+volatile LONG g_nv2a_kick_waiting;
+
+/* RECOMP_KICK_SPIN_US: how long the ack thread spins for an announced
+ * kickoff's flush bit (default 200; 0: off, the flush waits for a pass). A
+ * kickoff that skips the flush (D3D's flag 0x2000) never sets the bit, so
+ * the spin ends on this limit. */
+static uint64_t kick_spin_ns(void)
+{
+    static volatile long us = -1;
+
+    if (us < 0) {
+        const char *e = getenv("RECOMP_KICK_SPIN_US");
+        long v = (e && *e) ? strtol(e, NULL, 10) : 200;
+        us = v < 0 ? 0 : v > 2000 ? 2000 : v;
+    }
+    return (uint64_t)us * 1000u;
+}
+
+/* 1 once the announced flush is answered, or must not be: a held flip
+ * leaves it set, as the pass does, so pacing still stalls the title. */
+static int kick_ack_try(void)
+{
+    volatile uint32_t *r;
+
+    if (!g_nv2a_memory || nv2a_pb_exec_flip_held())
+        return 1;
+    r = (volatile uint32_t *)((char *)g_nv2a_memory + NV2A_ACK_PFB_FLUSH);
+    if (!(*r & NV2A_ACK[0].busy_mask))
+        return 0;
+    InterlockedAnd((volatile LONG *)r, (LONG)~NV2A_ACK[0].busy_mask);
+    return 1;
+}
+
+/* From the pushbuffer walker, between commands, while a kickoff is
+ * announced. */
+void xbox_Nv2aKickAck(void)
+{
+    if (kick_ack_try())
+        InterlockedExchange(&g_nv2a_kick_waiting, 0);
+}
+
+static void kick_ack_spin(void)
+{
+    uint64_t start = xbox_HostNowNs();
+
+    while (g_nv2a_kick_waiting) {
+        if (kick_ack_try() || xbox_HostNowNs() - start >= kick_spin_ns()) {
+            InterlockedExchange(&g_nv2a_kick_waiting, 0);
+            break;
+        }
+        YieldProcessor();
+    }
+}
+
 void nv2a_pb_flip_hold_wait(void)
 {
-    extern int nv2a_pb_exec_flip_held(void);
     uint64_t step = kick_hold_wait_ns(), start;
 
-    if (!step || !nv2a_pb_exec_flip_held())
-        return;
-    start = xbox_HostNowNs();
-    while (nv2a_pb_exec_flip_held()
-           && xbox_HostNowNs() - start < XBOX_FLIP_HOLD_MAX_NS)
-        xbox_HostSleepNs(step);
+    if (step && nv2a_pb_exec_flip_held()) {
+        start = xbox_HostNowNs();
+        while (nv2a_pb_exec_flip_held()
+               && xbox_HostNowNs() - start < XBOX_FLIP_HOLD_MAX_NS)
+            xbox_HostSleepNs(step);
+    }
+    if (kick_spin_ns())
+        InterlockedExchange(&g_nv2a_kick_waiting, 1);
 }
 
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+        if (g_nv2a_kick_waiting)
+            kick_ack_spin();
         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
          * which is how the title feels the console's FLIP_STALL. Nothing is
@@ -1710,7 +1776,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         /* Asked again: a hold this pass began may have ended meanwhile. */
         if (flip_held && ack_hold_sleep_ns() && nv2a_pb_exec_flip_poll())
             xbox_HostSleepNs(ack_hold_sleep_ns());
-        else
+        else if (!g_nv2a_kick_waiting)
             Sleep(0);  /* yield; the waiter is spinning on another core */
     }
     return 0;

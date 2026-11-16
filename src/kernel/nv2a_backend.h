@@ -169,7 +169,11 @@ void nv2a_pb_set_draws_off(int off);
  * title entering KickOff then would spin a host core for the rest of the
  * frame; waiting here first ends at the same release. Returns at once with
  * no hold, or with RECOMP_KICK_HOLD_WAIT_US=0 (the sleep step, default
- * 200 us). */
+ * 200 us).
+ *
+ * It then announces the kickoff, so the GPU side answers its PFB flush as
+ * soon as KickOff sets it instead of on its next pass (RECOMP_KICK_SPIN_US,
+ * default 200; 0 turns this off). */
 void nv2a_pb_flip_hold_wait(void);
 
 #endif /* NV2A_BACKEND_H */
