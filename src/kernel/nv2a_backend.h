@@ -127,6 +127,13 @@ int nv2a_backend_decode_texture(const Nv2aTexture *tex, uint32_t *argb_out);
  * the semaphore context DMA object through RAMIN. */
 void nv2a_pb_set_semaphore_target(uint32_t guest_va);
 
+/* The KEVENT XDK D3D waits on after patching software method 5 into the
+ * pushbuffer (its fence wait when the GPU is far behind): the miniport's event
+ * at miniport + 0x1A4, which D3D's interrupt handler sets for that method.
+ * The executor sets it when it executes the method. The title supplies the
+ * address, as for the semaphore. */
+void nv2a_pb_set_wake_event(uint32_t guest_va);
+
 /* Nonzero: draw nothing, for a host renderer that draws from the title's
  * API calls. The pushbuffer is still walked (fences, semaphores, notifiers,
  * flips); clears, batches and the flip's copy to the window are skipped. */

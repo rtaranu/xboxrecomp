@@ -2106,6 +2106,18 @@ static HANDLE ke_guest_event_prepare(uint32_t guest_va, int *type)
     return h;
 }
 
+/* KeSetEvent on a registered title event, from the runtime (the GPU executor
+ * standing in for an interrupt handler). */
+void xbox_SetTitleEvent(uint32_t guest_va)
+{
+    int type;
+    HANDLE ge;
+    BRIDGE_MEM32(guest_va + 4) = 1;
+    ge = ke_guest_event(guest_va, &type);
+    if (ge)
+        SetEvent(ge);
+}
+
 /* ── KeSetEvent (ordinal 145) ────────────────────────────── */
 static void bridge_KeSetEvent(void)
 {
@@ -8022,6 +8034,31 @@ static void ke_shadow_remove(uint32_t guest_va)
  * once now blocks until the event is set, and on a title whose setter the
  * runtime does not model yet (a GPU interrupt, say) that turns a spin into a
  * hang. Turn it on for a title that waits on events it built itself. */
+/* Title-built events whose setter the runtime models (D3D's software-method
+ * wake, nv2a_pb_set_wake_event): they take the path below whatever
+ * RECOMP_TITLE_KEVENTS says. */
+#define KE_TITLE_EVENTS_MAX 4
+static volatile uint32_t g_ke_title_events[KE_TITLE_EVENTS_MAX];
+
+void xbox_RegisterTitleEvent(uint32_t guest_va)
+{
+    int i;
+    for (i = 0; i < KE_TITLE_EVENTS_MAX; i++)
+        if (g_ke_title_events[i] == guest_va
+            || InterlockedCompareExchange((volatile LONG *)&g_ke_title_events[i],
+                                          (LONG)guest_va, 0) == 0)
+            return;
+}
+
+static int ke_title_event_registered(uint32_t guest_va)
+{
+    int i;
+    for (i = 0; i < KE_TITLE_EVENTS_MAX; i++)
+        if (g_ke_title_events[i] == guest_va)
+            return 1;
+    return 0;
+}
+
 static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 {
     static int enabled = -1;
@@ -8032,7 +8069,7 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
         const char *e = getenv("RECOMP_TITLE_KEVENTS");
         enabled = e && *e == '1';
     }
-    if (!enabled)
+    if (!enabled && !ke_title_event_registered(guest_va))
         return NULL;
     if (guest_va < 0x10000u || (guest_va & 3u))
         return NULL;
