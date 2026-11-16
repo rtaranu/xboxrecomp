@@ -44,6 +44,9 @@ uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 /* D3D's far-fence event (software method 5): no title events here. */
 void xbox_RegisterTitleEvent(uint32_t guest_va) { (void)guest_va; }
 void xbox_SetTitleEvent(uint32_t guest_va) { (void)guest_va; }
+/* The software-method trap (RECOMP_PGRAPH_TRAP): never raised here. */
+int xbox_Nv2aPgraphRaise(uint32_t addr, uint32_t data) { (void)addr; (void)data; return 0; }
+int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms) { (void)timeout_ms; return 1; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
 static void event(unsigned value)
