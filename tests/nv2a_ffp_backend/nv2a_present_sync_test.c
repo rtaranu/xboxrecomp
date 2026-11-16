@@ -43,6 +43,9 @@ static uint64_t s_now_ns;
 uint32_t xbox_VblankCount(void) { return s_vblanks; }
 uint64_t xbox_HostNowNs(void) { return s_now_ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
+/* D3D's far-fence event (software method 5): no title events here. */
+void xbox_RegisterTitleEvent(uint32_t guest_va) { (void)guest_va; }
+void xbox_SetTitleEvent(uint32_t guest_va) { (void)guest_va; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
 static void event(unsigned value)

@@ -413,6 +413,16 @@ static float reg_f(uint32_t method)
 static uint32_t s_sem_va;
 void nv2a_pb_set_semaphore_target(uint32_t guest_va) { s_sem_va = guest_va; }
 
+/* D3D's software method 5 wakes this event (see nv2a_backend.h). */
+extern void xbox_RegisterTitleEvent(uint32_t guest_va);
+extern void xbox_SetTitleEvent(uint32_t guest_va);
+static volatile uint32_t s_wake_va;
+void nv2a_pb_set_wake_event(uint32_t guest_va)
+{
+    xbox_RegisterTitleEvent(guest_va);
+    s_wake_va = guest_va;
+}
+
 /* Unhandled methods, ranked. The interesting output is not that something was
  * skipped but which things dominate, because that is the order to implement
  * them in. */
@@ -4968,7 +4978,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case NV097_NO_OPERATION:
         /* Non-zero, it is one of D3D's software methods, which the GPU traps
          * to D3D's interrupt handler on the console. Only the swap's interval
-         * matters here (nv2a_flip_hold.h); the rest stays a no-op. */
+         * matters here (nv2a_flip_hold.h), and method 5, whose handler
+         * wakes D3D's far-fence wait (nv2a_pb_set_wake_event); the rest stay
+         * no-ops. */
+        if ((param & 0x1Fu) == 5u && s_wake_va)
+            xbox_SetTitleEvent(s_wake_va);
         if (!nv2a_pb_exec_flip_pacing()) {
             if (!imm_vertex_method(method, param))
                 note_unhandled(method, param);   /* as before the hold */
