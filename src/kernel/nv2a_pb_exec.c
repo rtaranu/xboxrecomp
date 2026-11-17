@@ -120,7 +120,10 @@ static int surface_hits_image(uint32_t base, uint32_t bytes)
 static uint32_t dma_resolve(uint32_t offset)
 {
     extern uint32_t xbox_ContiguousAllocatedBytes(void);
+    uint32_t mem2_va;
 
+    if (xbox_mem2_phys_to_guest(offset, &mem2_va))
+        return mem2_va;
     /* Did this runtime hand the offset out as contiguous memory? Then the
      * bytes live in the window, and that is not a guess: the arena is a bump
      * allocator from XBOX_CONTIG_BASE, so everything below its high-water
@@ -542,6 +545,8 @@ static int guest_span_ok(uint64_t addr, uint32_t bytes)
     uint64_t end = addr + bytes;
 
     if (end <= (uint64_t)XBOX_CONTIG_SIZE)
+        return 1;
+    if (addr <= 0xFFFFFFFFu && xbox_mem2_arena_has((uint32_t)addr, bytes))
         return 1;
     return addr >= XBOX_CONTIG_BASE
         && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;

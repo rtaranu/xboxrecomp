@@ -87,6 +87,8 @@ extern size_t g_xbox_map_size;     /* host mapping; 0 means same as RAM */
  * set apart from the RAM size (xbox_SetMapSize), else the RAM size. */
 static inline uint32_t apu_mapped_ram(void)
 {
+    if (g_xbox_arena_top)               /* mem2: the top of the arena */
+        return g_xbox_arena_top;
     return (uint32_t)(g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram);
 }
 
@@ -113,6 +115,11 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
         if (a < apu_mapped_ram())
             return g_apu_ram_ptr + a;
         return g_apu_ram_ptr + (a & 0x03FFFFFFu);
+    }
+    {
+        uint32_t mem2_va;
+        if (xbox_mem2_phys_to_guest(a, &mem2_va))
+            return g_apu_ram_ptr + mem2_va;
     }
     /* A heap page the title named through MmGetPhysicalAddress is RAM, even
      * where the contiguous allocator has handed out the same number as a
@@ -150,11 +157,16 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
 const char *mcpx_apu_phys_class(uint64_t addr)
 {
     uint32_t a = (uint32_t)addr & 0x0FFFFFFFu;
+    uint32_t mem2_va;
     uint32_t alias = xbox_PhysRamAlias();
+    if (g_xbox_image_phys && a >= g_xbox_image_phys && a < g_xbox_arena_top)
+        return "img";                   /* mem2: the image's own numbers */
     if (alias && a >= alias && a - alias < (64u << 20))
         return "named";
     if (a >= (64u << 20))
         return a < apu_mapped_ram() ? "ram" : "wrap";
+    if (xbox_mem2_phys_to_guest(a, &mem2_va))
+        return mem2_va == a ? "ram" : "win";
     if (xbox_PhysRamNamedAt(a))
         return "named";
     if (xbox_ContiguousPageMap()[a >> 12])

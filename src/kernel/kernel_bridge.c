@@ -92,7 +92,7 @@ static int bridge_va_mapped(uint32_t va, uint32_t bytes)
 
     if (va < 0x1000)            /* page zero is deliberately unmapped */
         return 0;
-    if (end <= mapped)
+    if (end <= mapped || xbox_mem2_arena_has(va, bytes))
         return 1;
     return va >= XBOX_CONTIG_BASE
         && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;
@@ -1266,7 +1266,8 @@ static void bridge_NtAllocateVirtualMemory(void)
      * Until then, say so: silent aliasing surfaces as corrupted data
      * structures far from here, which is the worst way to find it.
      */
-    if (base_hint >= (g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram)) {
+    if (base_hint >= (g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram)
+            && !xbox_mem2_arena_has(base_hint, 1)) {
         static unsigned warned;
         if (warned++ < 8)
             fprintf(stderr,
@@ -1416,6 +1417,7 @@ static void bridge_NtQueryVirtualMemory(void)
     uint32_t base_va = STACK_ARG(0);
     uint32_t info_va = STACK_ARG(1);
     uint32_t page_base = base_va & ~0xFFFu;
+    uint32_t region_size;               /* mem2 */
 
     if (!info_va) {
         g_eax = 0xC000000Du;               /* STATUS_INVALID_PARAMETER */
@@ -1450,6 +1452,9 @@ static void bridge_NtQueryVirtualMemory(void)
 
     if (page_base >= g_xbox_code_lo && page_base < XBOX_TOTAL_RAM) {
         BRIDGE_MEM32(info_va + 0x0C) = XBOX_TOTAL_RAM - page_base; /* RegionSize */
+        BRIDGE_MEM32(info_va + 0x10) = 0x1000;         /* MEM_COMMIT */
+    } else if (xbox_mem2_query(page_base, &region_size)) {
+        BRIDGE_MEM32(info_va + 0x0C) = region_size;
         BRIDGE_MEM32(info_va + 0x10) = 0x1000;         /* MEM_COMMIT */
     } else {
         /* Free to the next boundary, not one page. A caller enumerating free
@@ -1530,8 +1535,7 @@ static void bridge_free_guest_pages(uint32_t base_ptr, uint32_t size_ptr,
     static unsigned long decommits, releases, refused;
     static uint64_t decommit_bytes;
     uint32_t base, size, page_base, end, left;
-    uint32_t mapped = (uint32_t)(g_xbox_map_size ? g_xbox_map_size
-                                                 : g_xbox_total_ram);
+    uint32_t mapped = XBOX_HEAP_TOP;    /* mem2: the heap's end, either model */
 
     if (!base_ptr || !size_ptr || !bridge_va_mapped(base_ptr, 4)
             || !bridge_va_mapped(size_ptr, 4)) {
@@ -1849,7 +1853,8 @@ static void bridge_HalReturnToFirmware(void)
         fprintf(stderr, "  [KERNEL] exit requested, guest esp=0x%08X:\n", g_esp);
         for (i = 0; i < 200; i++) {
             uint32_t a = g_esp + i * 4;
-            if (a < 0x00010000u || a >= 0x04000000u) break;
+            if (a < 0x00010000u
+                    || (a >= 0x04000000u && !xbox_mem2_arena_has(a, 4))) break;
             fprintf(stderr, "    GS %08X %08X\n", a,
                     *(const uint32_t *)(mem + a));
         }
@@ -5555,6 +5560,8 @@ static RECOMP_TLS uint32_t s_cxx_cur_obj, s_cxx_cur_ti;
 
 static int cxx_guest_ok(uint32_t va, uint32_t len)
 {
+    if (xbox_mem2_arena_has(va, len))   /* a guest stack is in the arena */
+        return 1;
     return va >= 0x00010000u && va + len < (uint32_t)g_xbox_total_ram;
 }
 
@@ -8131,8 +8138,9 @@ static int ke_event_header(uint32_t guest_va, int *type)
 
     if (guest_va < 0x10000u || (guest_va & 3u))
         return 0;
-    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u))
-        return 0;
+    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u)
+            && !xbox_mem2_arena_has(guest_va, 16))
+        return 0;                                  /* mem2: or the arena */
     hdr = BRIDGE_MEM32(guest_va);
     if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
         return 0;
