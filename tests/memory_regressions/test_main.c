@@ -572,6 +572,17 @@ int main(int argc, char **argv)
         uint32_t lo = xbox_ContiguousAllocEx(0x1000, 4096, 0, 0x00FFFFFFu);
         uint32_t again, k, c, lowest = 0xFFFFFFFFu;
 
+        /* RECOMP_CONTIG_AVOID_IMAGE is ignored here: two pages that must
+         * end one page above the image take the image's last page. */
+        if (avoid) {
+            uint32_t end = (g_xbox_image_hi + 0xFFFu) & ~0xFFFu;
+            c = xbox_ContiguousAllocEx(0x2000, 4096, 0, end + 0xFFFu);
+            snprintf(d, sizeof d, "got 0x%08X, image ends 0x%08X", c, end);
+            check(c == XBOX_CONTIG_BASE + end - 0x1000,
+                  "top-down: RECOMP_CONTIG_AVOID_IMAGE is ignored", d);
+            xbox_ContiguousFree(c);
+        }
+
         snprintf(d, sizeof d, "0x%08X then 0x%08X", a, b);
         check(a && b && b < a, "top-down: the next block is below the last", d);
         snprintf(d, sizeof d, "got 0x%08X", al);
