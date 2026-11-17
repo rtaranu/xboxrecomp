@@ -31,6 +31,9 @@ ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
 uint32_t g_xbox_image_lo, g_xbox_image_hi;
 uint32_t g_xbox_stack_base, g_xbox_stack_size;
 uint32_t xbox_ContiguousAllocatedBytes(void) { return 0; }
+/* Memory model 2 is off here. */
+int xbox_mem2_phys_to_guest(uint32_t pa, uint32_t *va) { (void)pa; (void)va; return 0; }
+int xbox_mem2_arena_has(uint32_t va, uint32_t bytes) { (void)va; (void)bytes; return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch)
 {
     (void)va;

@@ -18,3 +18,9 @@ add_test(NAME memory_regressions_heap_reclaim COMMAND memory_regressions_test he
 add_test(NAME memory_regressions_contig_avoid_image COMMAND memory_regressions_test contig-avoid-image ${XBE})
 add_test(NAME memory_regressions_ext_vma COMMAND memory_regressions_test ext-vma ${XBE})
 add_test(NAME memory_regressions_ext_vma_128 COMMAND memory_regressions_test ext-vma-128 ${XBE})
+# Memory model 2 (RECOMP_MEM_MODEL=2): "mem2" alone is heap-reclaim.
+add_test(NAME memory_regressions_mem2 COMMAND memory_regressions_test mem2 ${XBE})
+add_test(NAME memory_regressions_mem2_bottom_up COMMAND memory_regressions_test mem2-bottom-up ${XBE})
+add_test(NAME memory_regressions_mem2_ext_vma COMMAND memory_regressions_test mem2-ext-vma ${XBE})
+add_test(NAME memory_regressions_mem2_ext_vma_128 COMMAND memory_regressions_test mem2-ext-vma-128 ${XBE})
+add_test(NAME memory_regressions_mem2_ext_vma_mirrors COMMAND memory_regressions_test mem2-ext-vma-mirrors ${XBE})

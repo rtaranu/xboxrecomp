@@ -48,6 +48,9 @@
  *                 above the RAM mirrors gets it, can commit inside it and use
  *                 the memory, is told the truth when it asks, and is refused
  *                 cleanly for an address that would alias live memory.
+ *   mem2, mem2-<mode>  The mode under RECOMP_MEM_MODEL=2 (memory model 2;
+ *                 "mem2" alone is heap-reclaim, which the model implies).
+ *                 Check 8 and the tracker's range differ there.
  *   ext-vma-128   The same switch on a 128 MB map, where the mirrors already
  *                 reach past user space. The tracker must stay out of the way
  *                 rather than reserve a range of negative size.
@@ -216,23 +219,32 @@ int main(int argc, char **argv)
 {
     const char *mode = argc > 1 ? argv[1] : "default";
     const char *path = argc > 2 ? argv[2] : "tools/conformance/test.xbe";
-    int reclaim = !strcmp(mode, "heap-reclaim");
-    int ext128 = !strcmp(mode, "ext-vma-128");
-    int ext = ext128 || !strcmp(mode, "ext-vma");
-    int avoid = !strcmp(mode, "contig-avoid-image");
-    int split_off = !strcmp(mode, "heap-split-off");
+    /* A "mem2-" prefix runs the mode under RECOMP_MEM_MODEL=2. */
+    int mem2 = !strncmp(mode, "mem2", 4);
+    const char *sub = mem2 ? mode + (mode[4] == '-' ? 5 : 4) : mode;
+    int ext128 = !strcmp(sub, "ext-vma-128");
+    int mirrors = mem2 && !strcmp(sub, "ext-vma-mirrors");
+    int ext = ext128 || mirrors || !strcmp(sub, "ext-vma");
+    /* The model gives freed memory back, as RECOMP_HEAP_RECLAIM does. */
+    int reclaim = !strcmp(sub, "heap-reclaim") || (mem2 && !ext);
+    int avoid = !strcmp(sub, "contig-avoid-image");
+    int split_off = !strcmp(sub, "heap-split-off");
     size_t xbe_len = 0;
     unsigned char *xbe;
     char d[160];
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!reclaim && !ext && !avoid && !split_off && strcmp(mode, "default")) {
+    if (!reclaim && !ext && !avoid && !split_off && strcmp(sub, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
-    if (reclaim)
+    if (mem2)
+        set_env("RECOMP_MEM_MODEL", "2");
+    else if (reclaim)
         set_env("RECOMP_HEAP_RECLAIM", "1");
+    if (mirrors)
+        set_env("RECOMP_MIRRORS", "1");
     if (ext)
         set_env("RECOMP_EXT_VMA", "1");
     if (avoid)
@@ -265,6 +277,34 @@ int main(int argc, char **argv)
         }
     }
     printf("mode: %s\n", mode);
+
+    /* 8. Model 2: what is only virtual memory on the console is above RAM,
+     * in the arena, where its addresses cannot be taken for window numbers.
+     * Without it nothing is: the arena does not exist. */
+    if (mem2) {
+        uint32_t pa = 0, va = 0;
+
+        snprintf(d, sizeof d, "heap block 0x%08X, stack 0x%08X, arena 0x%08X..0x%08X",
+                 scratch, XBOX_STACK_BASE, g_xbox_arena_base, g_xbox_arena_top);
+        check(g_xbox_arena_base >= (uint32_t)g_xbox_total_ram &&
+              scratch >= XBOX_HEAP_BASE && XBOX_STACK_BASE >= g_xbox_arena_base &&
+              XBOX_KERNEL_DATA_BASE >= g_xbox_arena_base,
+              "the heap, the main stack and the toolkit region are above RAM", d);
+        check(xbox_mem2_arena_has(scratch, 0x10000) &&
+              xbox_mem2_arena_has(XBOX_STACK_TOP, 16) &&
+              !xbox_mem2_arena_has(g_xbox_arena_top, 4) && !xbox_mem2_arena_has(0, 4),
+              "the arena holds them; above it and page zero are not in it", NULL);
+        check(xbox_mem2_guest_to_phys(scratch, &pa) && pa == scratch &&
+              xbox_mem2_phys_to_guest(pa, &va) && va == scratch,
+              "a heap address is its own physical number, both ways", NULL);
+    } else {
+        uint32_t pa;
+        check(!g_xbox_arena_base && !g_xbox_arena_top && !g_xbox_image_phys &&
+              !xbox_mem2_arena_has(scratch, 16) &&
+              !xbox_mem2_guest_to_phys(scratch, &pa) &&
+              scratch < (uint32_t)g_xbox_total_ram,
+              "classic model: no arena, the heap is in RAM", NULL);
+    }
 
     /* 0. A contiguous block and the loaded image share physical numbers
      * unless RECOMP_CONTIG_AVOID_IMAGE keeps the block out of the image. */
@@ -338,10 +378,13 @@ int main(int argc, char **argv)
         (void)guard;
         for (k = 0; k < RUN; k++)
             xbox_HeapFree(run[k]);           /* each merges into run[0] */
-        xbox_PhysNoteRamName(t);
-        snprintf(d, sizeof d, "block 0x%08X, run 0x%08X..", t, run[0]);
-        check(xbox_PhysRamNamedAt(t),
-              "a named block before 255 merged-away slots stays named", d);
+        /* Model 2 keeps no record of named heap pages: its heap is above RAM. */
+        if (!mem2) {
+            xbox_PhysNoteRamName(t);
+            snprintf(d, sizeof d, "block 0x%08X, run 0x%08X..", t, run[0]);
+            check(xbox_PhysRamNamedAt(t),
+                  "a named block before 255 merged-away slots stays named", d);
+        }
     }
 
     /* 2c. Carving the front of a merged run reuses the slot after it for the
@@ -370,10 +413,12 @@ int main(int argc, char **argv)
             snprintf(d, sizeof d, "got 0x%08X, expected 0x%08X", big, run[0]);
             check(big == run[0], "a large request carves the merged run's front", d);
             tail = big + TAKE - PIECE;
-            xbox_PhysNoteRamName(tail);
-            snprintf(d, sizeof d, "block 0x%08X+0x%X, looked up 0x%08X", big, TAKE, tail);
-            check(xbox_PhysRamNamedAt(tail),
-                  "the carved block's second half is found by address", d);
+            if (!mem2) {                     /* no named-page record there */
+                xbox_PhysNoteRamName(tail);
+                snprintf(d, sizeof d, "block 0x%08X+0x%X, looked up 0x%08X", big, TAKE, tail);
+                check(xbox_PhysRamNamedAt(tail),
+                      "the carved block's second half is found by address", d);
+            }
         }
     }
 
@@ -514,7 +559,10 @@ int main(int argc, char **argv)
         const uint32_t hi = 0x76000000u;
         uint32_t base, size, st, mbi[7];
 
-        if (ext128) {
+        if (ext128 && mem2) {
+            check(guest_vmem_active(),
+                  "128 MB: the tracker has the range above the arena", NULL);
+        } else if (ext128) {
             check(!guest_vmem_active(),
                   "128 MB: the mirrors reach past user space, tracker stays off", NULL);
         } else if (!ext && !reclaim) {
@@ -576,17 +624,24 @@ int main(int argc, char **argv)
             /* An address inside the mirrors would alias live memory. */
             base = 0x10000000u; size = 0x100000;
             st = nt_alloc_at(&base, &size, 0x2000);
-            snprintf(d, sizeof d, "status 0x%08X", st);
-            check(st == 0xC0000018u, "an address inside the mirrors is refused", d);
-            st = nt_query(0x10000000u, mbi);
-            snprintf(d, sizeof d, "state 0x%X", mbi[4]);
-            check(st == 0 && mbi[4] == 0x2000,
-                  "query: the mirrors read as reserved, so a scanner moves on", d);
+            snprintf(d, sizeof d, "status 0x%08X, base 0x%08X", st, base);
+            if (mem2 && !mirrors) {
+                /* With no mirror there it is ordinary address space. */
+                check(st == 0 && base == 0x10000000u,
+                      "where a mirror used to be, a reservation is granted", d);
+            } else {
+                check(st == 0xC0000018u, "an address inside the mirrors is refused", d);
+                st = nt_query(0x10000000u, mbi);
+                snprintf(d, sizeof d, "state 0x%X", mbi[4]);
+                check(st == 0 && mbi[4] == 0x2000,
+                      "query: the mirrors read as reserved, so a scanner moves on", d);
+            }
 
             /* base = 0 still comes from the heap, below the mirrors. */
             st = nt_alloc(0x10000, &base);
             snprintf(d, sizeof d, "status 0x%08X, base 0x%08X", st, base);
-            check(st == 0 && base && base < 0x04000000u,
+            check(st == 0 && base &&
+                  (mem2 ? xbox_HeapBlockSize(base) != 0 : base < 0x04000000u),
                   "base = 0 still comes from the heap", d);
 
             /* Release gives the range back. */
