@@ -226,7 +226,10 @@ int main(int argc, char **argv)
     int mirrors = mem2 && !strcmp(sub, "ext-vma-mirrors");
     int ext = ext128 || mirrors || !strcmp(sub, "ext-vma");
     /* The model gives freed memory back, as RECOMP_HEAP_RECLAIM does. */
+    int bottom = mem2 && !strcmp(sub, "bottom-up");
     int reclaim = !strcmp(sub, "heap-reclaim") || (mem2 && !ext);
+    /* The model fills the contiguous window from the top. */
+    int topdown = mem2 && !bottom;
     int avoid = !strcmp(sub, "contig-avoid-image");
     int split_off = !strcmp(sub, "heap-split-off");
     size_t xbe_len = 0;
@@ -235,7 +238,7 @@ int main(int argc, char **argv)
     int i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    if (!reclaim && !ext && !avoid && !split_off && strcmp(sub, "default")) {
+    if (!reclaim && !ext && !avoid && !split_off && !bottom && strcmp(sub, "default")) {
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
@@ -245,6 +248,8 @@ int main(int argc, char **argv)
         set_env("RECOMP_HEAP_RECLAIM", "1");
     if (mirrors)
         set_env("RECOMP_MIRRORS", "1");
+    if (bottom)
+        set_env("RECOMP_CONTIG_TOP_DOWN", "0");
     if (ext)
         set_env("RECOMP_EXT_VMA", "1");
     if (avoid)
@@ -314,7 +319,10 @@ int main(int argc, char **argv)
         int overlaps = phys < g_xbox_image_hi && phys + 1024u * 1024u > g_xbox_image_lo;
         snprintf(d, sizeof d, "block 0x%08X, image 0x%08X..0x%08X",
                  c, g_xbox_image_lo, g_xbox_image_hi);
-        if (avoid)
+        if (topdown)
+            check(c && !overlaps && phys >= 48u * 1024 * 1024,
+                  "mem2: a 1 MB block comes from the top of the window", d);
+        else if (avoid)
             check(c && !overlaps, "avoid-image: a 1 MB block lands outside the image", d);
         else
             check(c && overlaps, "a 1 MB block still fills from the bottom by default", d);
@@ -552,6 +560,45 @@ int main(int argc, char **argv)
         snprintf(d, sizeof d, "got 0x%08X, 0x%08X, 0x%08X", b1, b2, b3);
         check(b1 && b2 && b3 && !(b1 & 0xFFFF) && !(b2 & 0xFFFF) && !(b3 & 0xFFFF),
               "NtAllocateVirtualMemory addresses are 64 KB-aligned", d);
+    }
+
+    /* 9. Model 2 fills the window from the top, as the console's kernel
+     * does, so low memory is the last to go. */
+    if (topdown && !ext) {
+        const uint32_t MB = 1024u * 1024u;
+        uint32_t a = xbox_ContiguousAlloc(0x3000, 4096);
+        uint32_t b = xbox_ContiguousAlloc(0x1000, 4096);
+        uint32_t al = xbox_ContiguousAlloc(0x1000, 0x10000);
+        uint32_t lo = xbox_ContiguousAllocEx(0x1000, 4096, 0, 0x00FFFFFFu);
+        uint32_t again, k, c, lowest = 0xFFFFFFFFu;
+
+        snprintf(d, sizeof d, "0x%08X then 0x%08X", a, b);
+        check(a && b && b < a, "top-down: the next block is below the last", d);
+        snprintf(d, sizeof d, "got 0x%08X", al);
+        check(al && (al & 0xFFFFu) == 0 && al - XBOX_CONTIG_BASE >= 16 * MB,
+              "top-down: an aligned block is aligned, and above 16 MB", d);
+        snprintf(d, sizeof d, "got 0x%08X", lo);
+        check(lo && lo - XBOX_CONTIG_BASE >= 15 * MB &&
+              lo + 0x1000 - XBOX_CONTIG_BASE <= 16 * MB,
+              "top-down: a request limited to 16 MB gets the top of that", d);
+        xbox_ContiguousFree(a);
+        again = xbox_ContiguousAlloc(0x3000, 4096);
+        snprintf(d, sizeof d, "freed 0x%08X, got 0x%08X", a, again);
+        check(again >= a, "top-down: a freed block high up is used again", d);
+        /* Ordinary blocks never take the megabyte kept below 16 MB: fill
+         * the window and see where they stop. */
+        for (k = 0; k < 64; k++) {
+            c = xbox_ContiguousAlloc(MB, 4096);
+            if (c && c < lowest)
+                lowest = c;
+        }
+        snprintf(d, sizeof d, "lowest 0x%08X", lowest);
+        check(lowest != 0xFFFFFFFFu && lowest - XBOX_CONTIG_BASE < 15 * MB,
+              "top-down: the window fills down past 16 MB", d);
+        lo = xbox_ContiguousAllocEx(0x1000, 4096, 0, 0x00FFFFFFu);
+        snprintf(d, sizeof d, "got 0x%08X", lo);
+        check(lo && lo - XBOX_CONTIG_BASE >= 15 * MB,
+              "top-down: the megabyte below 16 MB is still there for it", d);
     }
 
     /* 4. Above the RAM mirrors: [0x74000000, 0x7FFE0000) at 64 MB. */

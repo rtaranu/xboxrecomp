@@ -22,7 +22,8 @@
  * or above 64 MB is the guest address of the same value.
  *
  * With the model on, freed memory is always given back (as under
- * RECOMP_HEAP_RECLAIM) and the RAM mirrors are off unless RECOMP_MIRRORS=1.
+ * RECOMP_HEAP_RECLAIM), the RAM mirrors are off unless RECOMP_MIRRORS=1, and
+ * the contiguous window is filled from the top unless RECOMP_CONTIG_TOP_DOWN=0.
  * The hooks in the classic files are marked "mem2".
  *
  * docs/technical/memory-experiment.md has the background and the findings.
@@ -193,6 +194,16 @@ int xbox_mem2_phys_to_guest(uint32_t pa, uint32_t *va)
         *va = XBOX_CONTIG_BASE + pa;
     }
     return 1;
+}
+
+int xbox_mem2_contig_top_down(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_CONTIG_TOP_DOWN");
+        on = xbox_mem2_on() && !(e && e[0] == '0');
+    }
+    return on;
 }
 
 void xbox_mem2_contig_taken(uint32_t first, uint32_t pages)

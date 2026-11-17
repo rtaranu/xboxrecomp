@@ -4608,7 +4608,10 @@ void xbox_FreeThreadStack(uint32_t stack_top)
  * surface and buffer the logs and tools name by address (a title's back
  * buffers, for one). Keeping one megabyte back
  * changes nothing that is placed below 15 MB. A request whose range ends
- * below 16 MB can use the reserve; any other request skips it. */
+ * below 16 MB can use the reserve; any other request skips it.
+ *
+ * Memory model 2 does allocate from the top (xbox_mem2_contig_top_down) and
+ * keeps the reserve for a window that has filled all the way down. */
 #define CONTIG_LOW_RESERVE_START ((15u << 20) / CONTIG_PAGE)
 #define CONTIG_LOW_RESERVE_END   ((16u << 20) / CONTIG_PAGE)
 
@@ -4630,6 +4633,8 @@ static uint32_t g_contig_len[CONTIG_PAGES];    /* pages, at a block's first page
 static uint32_t g_contig_pages_in_use;
 static uint32_t g_contig_high = CONTIG_PAGE;   /* high-water mark, bytes */
 static uint32_t g_contig_first_free = 1;       /* no free page below this */
+static uint32_t g_contig_low = XBOX_CONTIG_SIZE; /* mem2, top-down: the lowest
+                                                  * an ordinary request got */
 static uint32_t g_contig_allocs, g_contig_frees;
 static uint32_t g_contig_peak_pages;
 static DWORD    g_contig_t0;
@@ -4699,12 +4704,14 @@ static void contig_report(const char *what, uint32_t va, uint32_t pages)
         return;
     last_pages = g_contig_pages_in_use;
     fprintf(stderr, "  [CONTIG] t=%.1fs %s 0x%08X %u KB: in use %u KB, "
-            "peak %u KB, high-water %u KB (allocs=%u frees=%u)\n",
+            "peak %u KB, %s %u KB (allocs=%u frees=%u)\n",
             (GetTickCount() - g_contig_t0) / 1000.0, what, va,
             pages * (CONTIG_PAGE / 1024),
             g_contig_pages_in_use * (CONTIG_PAGE / 1024),
             g_contig_peak_pages * (CONTIG_PAGE / 1024),
-            g_contig_high / 1024, g_contig_allocs, g_contig_frees);
+            xbox_mem2_contig_top_down() ? "filled down to" : "high-water",
+            (xbox_mem2_contig_top_down() ? g_contig_low : g_contig_high) / 1024,
+            g_contig_allocs, g_contig_frees);
     fflush(stderr);
 }
 
@@ -4783,6 +4790,39 @@ uint32_t xbox_ContiguousAllocEx(uint32_t size, uint32_t alignment,
     if (lo_page < g_contig_first_free) lo_page = g_contig_first_free;
     for (pass = contig_avoid_image() ? 0 : 1; pass < 2 && !result; pass++) {
         int avoid = pass == 0;
+        if (xbox_mem2_contig_top_down()) {
+            /* mem2: the highest run that fits, as the console's kernel
+             * chooses. Low memory stays free for the requests that must be
+             * there and for blocks a title places itself. */
+            p = limit >= n ? (limit - n) & ~(align_pages - 1) : 0;
+            while (limit >= n && p >= lo_page) {
+                uint32_t below = p;        /* the next candidate ends here */
+
+                if (limit > CONTIG_LOW_RESERVE_END && p < CONTIG_LOW_RESERVE_END
+                        && p + n > CONTIG_LOW_RESERVE_START) {
+                    below = CONTIG_LOW_RESERVE_START;
+                } else {
+                    for (q = p + n; q > p && contig_page_free(q - 1, avoid); q--)
+                        ;
+                    if (q == p) {
+                        contig_take(p, n);
+                        result = XBOX_CONTIG_BASE + p * CONTIG_PAGE;
+                        if (limit > CONTIG_LOW_RESERVE_END
+                                && p * CONTIG_PAGE < g_contig_low)
+                            g_contig_low = p * CONTIG_PAGE;
+                        break;
+                    }
+                    /* Page q - 1 stopped us: go below the run it is in. */
+                    for (below = q - 1;
+                         below > 0 && !contig_page_free(below - 1, avoid); below--)
+                        ;
+                }
+                if (below < n)
+                    break;
+                p = (below - n) & ~(align_pages - 1);
+            }
+            continue;
+        }
         p = (lo_page + align_pages - 1) & ~(align_pages - 1);
         while ((uint64_t)p + n <= limit) {
             /* A request free to go above 16 MB steps over the low reserve. */
