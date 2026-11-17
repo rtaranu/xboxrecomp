@@ -181,6 +181,10 @@ ULONG_PTR __stdcall xbox_MmGetPhysicalAddress(PVOID BaseAddress)
      * nothing naming this function.
      */
     uint32_t va = (uint32_t)(uintptr_t)BaseAddress;
+    uint32_t mem2_pa;
+
+    if (xbox_mem2_guest_to_phys(va, &mem2_pa))
+        return (ULONG_PTR)mem2_pa;
     if (va >= XBOX_CONTIG_BASE &&
             (uint64_t)va < (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
         return (ULONG_PTR)(va - XBOX_CONTIG_BASE);

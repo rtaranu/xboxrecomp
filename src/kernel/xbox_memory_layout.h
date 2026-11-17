@@ -24,6 +24,7 @@
 
 #include "platform/xbox_winnt.h"
 #include <stdint.h>
+#include "xbox_mem2.h"              /* memory model 2, RECOMP_MEM_MODEL=2 */
 
 #ifdef __cplusplus
 extern "C" {
@@ -519,7 +520,8 @@ extern RECOMP_TLS uint32_t g_fs_base;
  * Letting the ordinary heap serve the whole mapped range keeps every
  * allocation inside one allocator the guest already understands.
  */
-#define XBOX_HEAP_TOP       ((uint32_t)(g_xbox_map_size ? g_xbox_map_size \
+#define XBOX_HEAP_TOP       (g_xbox_heap_top ? g_xbox_heap_top : /* mem2 */ \
+                             (uint32_t)(g_xbox_map_size ? g_xbox_map_size \
                                                         : g_xbox_total_ram))
 
 /** No static mirror/guard region. RAM mirror is handled via file mapping

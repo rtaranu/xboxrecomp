@@ -130,10 +130,12 @@ void nv2a_pb_exec_set_resolver(int (*fn)(uint32_t offset, uint32_t *va))
 static uint32_t dma_resolve_offset(uint32_t offset)
 {
     extern uint32_t xbox_ContiguousAllocatedBytes(void);
-    uint32_t told;
+    uint32_t told, mem2_va;
 
     if (s_resolver && s_resolver(offset, &told))
         return told;
+    if (xbox_mem2_phys_to_guest(offset, &mem2_va))
+        return mem2_va;
     /* Did this runtime hand the offset out as contiguous memory? Then the
      * bytes live in the window, and that is not a guess: the arena is a bump
      * allocator from XBOX_CONTIG_BASE, so everything below its high-water
@@ -572,6 +574,8 @@ static int guest_span_ok(uint64_t addr, uint32_t bytes)
     uint64_t end = addr + bytes;
 
     if (end <= (uint64_t)XBOX_CONTIG_SIZE)
+        return 1;
+    if (addr <= 0xFFFFFFFFu && xbox_mem2_arena_has((uint32_t)addr, bytes))
         return 1;
     return addr >= XBOX_CONTIG_BASE
         && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;

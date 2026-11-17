@@ -475,6 +475,8 @@ static int guest_ok(uint32_t va, uint32_t bytes)
 
     if (va == 0 || mapped == 0)
         return 0;
+    if (xbox_mem2_arena_has(va, bytes))
+        return 1;
     /* Descriptors live where a driver puts DMA memory, and on Xbox that is
      * MmAllocateContiguousMemory -- the contiguous window, not low RAM. The
      * bound below reads as "is this in RAM", which is not the question: the
@@ -522,8 +524,11 @@ static int guest_ok(uint32_t va, uint32_t bytes)
  * report buffer is one. */
 static uint32_t bus_resolve(uint32_t addr)
 {
+    uint32_t mem2_va;
     uint32_t alias = xbox_PhysRamAlias();
 
+    if (addr && xbox_mem2_phys_to_guest(addr, &mem2_va))
+        return mem2_va;
     if (alias && addr >= alias && addr - alias < XBOX_CONTIG_SIZE)
         return addr - alias;
     if (addr >= g_xbox_image_lo && addr < g_xbox_image_hi)

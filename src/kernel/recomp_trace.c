@@ -182,7 +182,8 @@ void recomp_trace_enter(const char *name, uint32_t va)
             for (i = 1; i <= n; i++) {
                 uint32_t a = *(const uint32_t *)(mem + g_esp + i * 4);
                 int k;
-                if (a < 0x00010000u || a >= 0x04000000u)
+                if (a < 0x00010000u
+                        || (a >= 0x04000000u && !xbox_mem2_arena_has(a, 48)))
                     continue;
                 fprintf(stderr, "         arg%d -> [%08X]:", i, a);
                 for (k = 0; k < 12; k++)
@@ -191,7 +192,8 @@ void recomp_trace_enter(const char *name, uint32_t va)
                 fprintf(stderr, "\n");
             }
         }
-        if (g_eax > 0x00010000u && g_eax < 0x04000000u) {
+        if (g_eax > 0x00010000u
+                && (g_eax < 0x04000000u || xbox_mem2_arena_has(g_eax, 96))) {
             fprintf(stderr, "         [eax=%08X]:", g_eax);
             for (i = 0; i < 24; i++)
                 fprintf(stderr, " %08X",

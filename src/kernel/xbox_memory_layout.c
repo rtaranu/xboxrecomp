@@ -1067,6 +1067,8 @@ static int fence_readable(uint32_t va, uint32_t bytes)
     if (va >= XBOX_CONTIG_BASE
             && (uint64_t)va + bytes <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
         return g_contig_memory != NULL;
+    if (xbox_mem2_arena_has(va, bytes))
+        return 1;
     return (size_t)va + bytes <= g_memory_size;
 }
 
@@ -2338,6 +2340,8 @@ static int peek_readable(uint32_t va)
 {
     struct { const void *mapped; uint32_t base; uint64_t size; } win[] = {
         { g_memory_base,   XBOX_BASE_ADDRESS, (uint64_t)g_memory_size },
+        { g_memory_base,   g_xbox_arena_base,                 /* mem2 */
+          (uint64_t)g_xbox_heap_top - g_xbox_arena_base },
         { g_contig_memory, XBOX_CONTIG_BASE,  XBOX_CONTIG_SIZE },
         { g_nv2a_memory,   XBOX_NV2A_BASE,    XBOX_NV2A_SIZE },
         { g_mcpx_memory,   XBOX_MCPX_BASE,    XBOX_MCPX_SIZE },
@@ -2987,6 +2991,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * at multiples of this, so growing it is what stops a title's
      * above-RAM allocations from aliasing low memory. */
     g_memory_size = g_xbox_map_size ? g_xbox_map_size : g_xbox_total_ram;
+    if (xbox_mem2_on())             /* mem2: RAM only; the arena grows instead */
+        g_memory_size = g_xbox_total_ram;
 
     /*
      * Create a file mapping backed by the page file.
@@ -3370,6 +3376,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * before anything below writes the scratch structures, the stack or the
      * heap.
      */
+    if (xbox_mem2_on()) {           /* mem2: all three go in the arena */
+        if (!xbox_mem2_place(g_memory_base, g_memory_size, g_mapping_handle,
+                             (xbox_mem2_map_fn)layout_map_view, layout_commit_at))
+            return FALSE;
+        xbox_heap_reset_base();
+    } else
     {
         const uint32_t MB = 1024u * 1024u;
         uint32_t image_end = (g_xbox_image_hi + 0xFFFFu) & ~0xFFFFu;
@@ -3928,6 +3940,17 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                         m + 1, (unsigned)XBOX_NV2A_BASE);
                 continue;
             }
+            if (xbox_mem2_on()) {   /* mem2: the arena has the first slices,
+                                     * and the rest are off unless asked for */
+                if (guest_lo < g_xbox_arena_top)
+                    continue;
+                if (!xbox_mem2_mirrors_on()) {
+                    if (!g_span_base && !getenv("RECOMP_EXT_VMA"))
+                        VirtualAlloc((LPVOID)mirror_base, g_memory_size,
+                                     MEM_RESERVE, PAGE_NOACCESS);
+                    continue;
+                }
+            }
             /* Inside the reservation this hands back the slice we are about
              * to use; outside it (no reservation) this is a no-op on an
              * address we never held. When the span holds the whole window
@@ -3956,7 +3979,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * mirrors, while a fixed host address is still likely to be free. */
     {
         uint64_t mirror_top = (uint64_t)g_memory_size * (1u + XBOX_NUM_MIRRORS);
-        uint64_t ext = ext_vma_span(mirror_top);
+        uint64_t mirror_lo = g_memory_size;
+        uint64_t ext;
+
+        if (xbox_mem2_on()) {       /* mem2: the tracker starts above the arena */
+            mirror_lo = g_xbox_arena_top;
+            if (!xbox_mem2_mirrors_on())
+                mirror_top = mirror_lo;
+        }
+        ext = ext_vma_span(mirror_top);
 
         /* guest_vmem reserves its range itself, with a plain fixed-address
          * reservation, and only where the host reports it free. Our own hold
@@ -3976,7 +4007,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
                 VirtualFree((LPVOID)host, (SIZE_T)ext, MEM_RELEASE);
 #endif
         }
-        guest_vmem_init(g_memory_offset, g_memory_size, mirror_top);
+        guest_vmem_init(g_memory_offset, mirror_lo, mirror_top);
     }
 
     /*
@@ -4118,6 +4149,7 @@ void xbox_MemoryLayoutShutdown(void)
         VirtualFree(g_nv2a_memory, 0, MEM_RELEASE);
         g_nv2a_memory = NULL;
     }
+    xbox_mem2_shutdown();
     /* Unmap mirror views first */
     for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
         if (g_mirror_views[m]) {
@@ -4233,7 +4265,8 @@ uint32_t xbox_ReserveAlloc(uint32_t size, uint32_t align)
 BOOL xbox_IsXboxAddress(uintptr_t address)
 {
     return (address >= XBOX_BASE_ADDRESS &&
-            address < XBOX_BASE_ADDRESS + g_memory_size);
+            address < XBOX_BASE_ADDRESS + g_memory_size)
+        || xbox_mem2_arena_has((uint32_t)address, 1);
 }
 
 void *xbox_GetMemoryBase(void)
@@ -4291,7 +4324,7 @@ int xbox_HeapReclaimEnabled(void)
 {
     static int on = -1;
     if (on < 0)
-        on = getenv("RECOMP_HEAP_RECLAIM") != NULL;
+        on = getenv("RECOMP_HEAP_RECLAIM") != NULL || xbox_mem2_on();
     return on;
 }
 
@@ -4690,6 +4723,7 @@ static void contig_take(uint32_t first, uint32_t n)
     uint32_t end = (first + n) * CONTIG_PAGE;
 
     memset(&g_contig_used[first], 1, n);
+    xbox_mem2_contig_taken(first, n);
     g_contig_len[first] = n;
     g_contig_pages_in_use += n;
     if (g_contig_pages_in_use > g_contig_peak_pages)
