@@ -49,6 +49,10 @@ int xbox_mem2_arena_has(uint32_t va, uint32_t bytes);
 int xbox_mem2_guest_to_phys(uint32_t va, uint32_t *pa);
 int xbox_mem2_phys_to_guest(uint32_t pa, uint32_t *va);
 
+/* 1 when the contiguous window is filled from the top, as the console's
+ * kernel fills it: with the model on, unless RECOMP_CONTIG_TOP_DOWN=0. */
+int xbox_mem2_contig_top_down(void);
+
 /* The contiguous allocator handed out `pages` 4 KB pages from `first`. */
 void xbox_mem2_contig_taken(uint32_t first, uint32_t pages);
 
