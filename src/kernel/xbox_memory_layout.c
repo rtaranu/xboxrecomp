@@ -4752,7 +4752,9 @@ static int contig_avoid_image(void)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("RECOMP_CONTIG_AVOID_IMAGE");
-        on = e && atoi(e) != 0;
+        /* mem2: filled from the top, blocks reach the image last and its
+         * numbers are not the window's, so the switch is ignored. */
+        on = e && atoi(e) != 0 && !xbox_mem2_contig_top_down();
     }
     return on;
 }
