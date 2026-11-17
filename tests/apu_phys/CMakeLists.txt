@@ -14,3 +14,11 @@ add_test(NAME apu_phys
 add_test(NAME apu_phys_record
          COMMAND apu_phys_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
 set_tests_properties(apu_phys_record PROPERTIES ENVIRONMENT RECOMP_PHYS_RAM_ALIAS=0)
+
+# The same question under memory model 2 (RECOMP_MEM_MODEL=2), where the heap
+# and the image have physical numbers of their own.
+add_executable(apu_phys_mem2_test test_mem2.c)
+target_include_directories(apu_phys_mem2_test PRIVATE ../../src ../../src/apu ../../src/kernel)
+target_link_libraries(apu_phys_mem2_test PRIVATE xboxrecomp)
+add_test(NAME apu_phys_mem2
+         COMMAND apu_phys_mem2_test ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/conformance/test.xbe)
