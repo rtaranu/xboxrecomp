@@ -4918,6 +4918,33 @@ void xbox_HeapFree(uint32_t xbox_va)
     ReleaseSRWLockExclusive(&g_heap_lock);
 }
 
+/* Bytes of RAM a console would still have free: RAM less the image, the live
+ * heap and the contiguous blocks in use, never more than the heap itself can
+ * still hand out. For MmQueryStatistics. The heap and the window are separate
+ * storage here, one pool on the console; titles size and throttle against the
+ * console's figure. */
+uint32_t xbox_AvailableRamBytes(void)
+{
+    uint64_t live = 0, spare = 0, ram = g_xbox_total_ram, used;
+
+    AcquireSRWLockShared(&g_heap_lock);
+    for (int i = 0; i < g_heap_block_count; i++) {
+        if (g_heap_blocks[i].free)
+            spare += g_heap_blocks[i].size;
+        else
+            live += g_heap_blocks[i].size;
+    }
+    if (g_heap_next && XBOX_HEAP_TOP > g_heap_next)
+        spare += XBOX_HEAP_TOP - g_heap_next;
+    else if (!g_heap_next)
+        spare += XBOX_HEAP_TOP - XBOX_HEAP_BASE;
+    ReleaseSRWLockShared(&g_heap_lock);
+
+    used = (uint64_t)g_xbox_image_hi + live + xbox_ContiguousInUseBytes();
+    ram = used < ram ? ram - used : 0;
+    return (uint32_t)(ram < spare ? ram : spare);
+}
+
 HANDLE xbox_GetMappingHandle(void)
 {
     return g_mapping_handle;

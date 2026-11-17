@@ -127,24 +127,18 @@ VOID __stdcall xbox_MmFreeSystemMemory(PVOID BaseAddress, ULONG NumberOfBytes)
 
 NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
 {
-    MEMORYSTATUSEX ms;
-    ms.dwLength = sizeof(ms);
-
     if (!MemoryStatistics)
         return STATUS_INVALID_PARAMETER;
-
-    if (!GlobalMemoryStatusEx(&ms))
-        return STATUS_UNSUCCESSFUL;
 
     memset(MemoryStatistics, 0, sizeof(XBOX_MM_STATISTICS));
     MemoryStatistics->Length = sizeof(XBOX_MM_STATISTICS);
 
-    /* Xbox has 64MB RAM. Report plausible values. */
-    ULONG page_size = 4096;
-    MemoryStatistics->TotalPhysicalPages = 64 * 1024 * 1024 / page_size; /* 16384 pages */
-    MemoryStatistics->AvailablePages = (ULONG)(ms.ullAvailPhys / page_size);
-    if (MemoryStatistics->AvailablePages > MemoryStatistics->TotalPhysicalPages)
-        MemoryStatistics->AvailablePages = MemoryStatistics->TotalPhysicalPages / 2;
+    /* What the guest really has left. Titles throttle on it: MechAssault
+     * samples it every frame and stops adding effects below 2 MB. A fixed
+     * half of RAM (the old answer) never throttled, and its second mission
+     * filled the heap and rebooted. */
+    MemoryStatistics->TotalPhysicalPages = (ULONG)(g_xbox_total_ram / 4096);
+    MemoryStatistics->AvailablePages = xbox_AvailableRamBytes() / 4096;
 
     return STATUS_SUCCESS;
 }
