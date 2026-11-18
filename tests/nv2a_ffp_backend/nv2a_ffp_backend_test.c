@@ -54,10 +54,26 @@ void xbox_SetTitleEvent(uint32_t guest_va) { (void)guest_va; }
 int xbox_Nv2aPgraphRaise(uint32_t addr, uint32_t data) { (void)addr; (void)data; return 0; }
 int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms) { (void)timeout_ms; return 1; }
 
+/* The registers the executor reads: PGRAPH 0x400B10, and one graphics object
+ * as a title's D3D sets it up. PFIFO 0x2210 places a 4 KB object table at
+ * the start of instance memory (0x700000); its one entry pairs
+ * PATTERN_HANDLE with the instance at 0x701000, whose first word is the
+ * class, 0x44 (a pattern). */
+#define PATTERN_HANDLE 0xFEED0044u
 static volatile uint32_t s_pgraph_400b10;
+static volatile uint32_t s_ramht_cfg;
+static volatile uint32_t s_ramht[2] = { PATTERN_HANDLE, 0x80000000u | 0x100u };
+static volatile uint32_t s_pattern_class = 0x44u;
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset)
 {
-    return offset == 0x400B10u ? &s_pgraph_400b10 : NULL;
+    switch (offset) {
+    case 0x400B10u: return &s_pgraph_400b10;
+    case 0x002210u: return &s_ramht_cfg;
+    case 0x700000u: return &s_ramht[0];
+    case 0x700004u: return &s_ramht[1];
+    case 0x701000u: return &s_pattern_class;
+    }
+    return NULL;
 }
 
 /* ---- the fake back end ------------------------------------------------- */
@@ -244,8 +260,10 @@ int main(void)
         CHECK(got == 0x1234);
     }
 
-    /* Method 0x0310 on subchannel 5 is latched into PGRAPH 0x400B10; on the
-     * 3D subchannel it is SET_DITHER_ENABLE and is not. */
+    /* Method 0x0310 on the subchannel bound to the pattern object is latched
+     * into PGRAPH 0x400B10; on the 3D subchannel it is SET_DITHER_ENABLE and
+     * is not. */
+    nv2a_pb_exec_method(5, 0x0000, PATTERN_HANDLE);
     nv2a_pb_exec_method(5, 0x0310, 0xABCD1234u);
     CHECK(s_pgraph_400b10 == 0xABCD1234u);
     nv2a_pb_exec_method(0, 0x0310, 7);

@@ -78,11 +78,18 @@ the thread that would otherwise answer.
   `nv2a_pb_set_semaphore_target()` names the word by hand, for a title whose
   commands do not. How a title's fence wait uses it is in
   [D3D8LTCG Device Context](d3d8ltcg-device-context.md#when-something-does-read-the-pushbuffer).
-- **Method `0x0310` on subchannel 5.** D3D's `KickOff` ends every kick with it,
-  carrying `((pushbuffer address * 8 | fence & 0x1F) << 2) | wrap & 3`. The
-  GPU latches it in PGRAPH `0x400B10`, and D3D waits for the fence bits there.
-  The executor latches the value. Without it `0x400B10` read 0 and the wait
-  ended only when the semaphore was a multiple of 32.
+- **The pattern object's colour.** XDK 5849's `KickOff` sends, before every
+  semaphore release, method `0x0310` to the subchannel that has its pattern
+  object (class `0x44`), carrying
+  `((pushbuffer address * 8 | fence & 0x1F) << 2) | wrap & 3`. That method is
+  the pattern's first colour, which the GPU keeps in PGRAPH `0x400B10`; D3D
+  draws no patterns and reads the register back as a marker of how far the GPU
+  has got, waiting until its fence bits agree with the semaphore. The executor
+  keeps the register for whichever subchannel holds a pattern object, in both
+  walks. Without it `0x400B10` read 0 and the wait ended only when the
+  semaphore was a multiple of 32: a hang now and then at a level load. The
+  method is in the nouveau register database; the register's address is known
+  from that D3D alone.
 - **`DMA_GET`.** It is the GPU's fetch pointer — nothing at or past it has been
   read — and D3D's fence wait relies on that: when its fence is far enough
   ahead of GET it patches a "wake me" software method into the pushbuffer at
@@ -239,7 +246,7 @@ when it matters rather than adding callbacks.
 |---|---|
 | `RECOMP_PB_SCAN` | read-only survey of the pushbuffer; ranks what is not implemented |
 | `RECOMP_PB_EXEC` | execute it |
-| `RECOMP_PB_WALK=dma` | walk the pushbuffer like the DMA engine (JUMPs, wraps, GET per command, the `0x0310` latch) instead of scanning each submitted segment; see [The DMA Walk Is Opt-In](#the-dma-walk-is-opt-in) |
+| `RECOMP_PB_WALK=dma` | walk the pushbuffer like the DMA engine (JUMPs, wraps, GET per command) instead of scanning each submitted segment; see [The DMA Walk Is Opt-In](#the-dma-walk-is-opt-in) |
 | `RECOMP_PB_EXEC_VERBOSE` | per-batch trace |
 | `RECOMP_FFP_TRACE` | composite matrix and sample vertices of the first fixed-function batches |
 | `RECOMP_TEX_BILINEAR` | the CPU rasteriser blends the four nearest texels of every textured pixel instead of taking the nearest one, whatever `SET_TEXTURE_FILTER` asked for. All three sampling paths: pixel-position batches, the perspective path and the register-combiner stages. Off by default: nearest texel. No mip levels, so a minified texture is not blurred by level. A GPU back end has its own filtering and is not affected |
@@ -254,8 +261,7 @@ scans each segment between the previous `DMA_PUT` and the new one, as it did
 before the walk existed.
 
 The walk is the more faithful of the two, and that is the reason it is opt-in.
-Told exactly how far the GPU has got (`DMA_GET` per command and the `0x0310`
-latch), XDK D3D's fence code takes its "GPU far behind" path: it patches a
+Told exactly how far the GPU has got (`DMA_GET` per command), XDK D3D's fence code takes its "GPU far behind" path: it patches a
 software method (`NO_OPERATION` with a value) into the pushbuffer and sleeps on
 an event that the GPU's interrupt for that method sets. Until the runtime
 delivers that interrupt, a title that runs under the segment scan can freeze
