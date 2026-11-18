@@ -168,6 +168,89 @@ kickoff worth a tenth of MechAssault's main thread. So the worker spins for a
 short, tunable time after its last work before it sleeps, as `kick_ack_spin`
 does now, and the A/B checks set the default (0 if it buys nothing).
 
+## Measurements
+
+What to measure before building, against the loop as it polls today. Each
+names the result that would change the design. One short run per title at a
+busy spot (Halo, MechAssault, Burnout 3, Splinter Cell, DOAX), the same spot
+every time.
+
+### Counters in the loop
+
+One instrument answers most of it: what each pass found. Plain increments
+behind one environment variable, printed at a clean exit and when a frame
+capture is asked for, never per event.
+
+- passes that found work, by job: flush cleared, each interrupt status
+  register cleared (and which bits), idle bits re-set, `PUT` moved, each
+  mirror or `POKE` that changed something, the vblank backstop firing;
+- total passes and frames, to read the rest per frame and per second;
+- latency histograms (powers of two, in µs): kickoff announcement to flush
+  cleared, and `PUT` seen to `GET` equal to `PUT`.
+
+| Result | Effect on the design |
+|---|---|
+| Idle bits re-set more than once | not "set once": trap their page or leave them to the safety net |
+| An interrupt status register never cleared in any title | its page is not trapped; the row goes |
+| One cleared often | confirms its trap; the bits say who raises it |
+| A mirror changes on passes where `PUT` did not move | each walk and the safety net is too slow for it; it needs another trigger |
+| The vblank backstop fires in normal play | it cannot move to the safety net as it is |
+
+### Writes per page
+
+The title's writes to each candidate page, per frame, with the writer.
+`RECOMP_WATCH` faults on writes to a page already; a count-only mode of it,
+one page a run, if it can be pointed at the aperture, and a small counting
+handler if not. The writers also show whether `KickOff` writes `PUT` before
+or after the flush.
+
+- thousands of writes a frame rule the page out;
+- writes to other registers of the flush's or `PUT`'s page change the cost.
+
+### Trap cost
+
+Time one round trip of the PGRAPH handler (fault, single step, two
+`VirtualProtect` calls), in a standalone test and in Halo under
+`RECOMP_PGRAPH_TRAP=1`, and multiply by the writes per page. Above about 1%
+of a frame in any title, emulating the store in the handler is no longer
+optional.
+
+### Wake latency
+
+Standalone: one thread sets an event, another sleeps on it; a histogram of
+the delay, with and without a short spin before the sleep. Compared with the
+`PUT`-to-`GET` histogram above: no worse than a pass today and the spin
+leaves the design; worse, and the histogram sets its default.
+
+### What the polling buys
+
+Phase 6, predicted before any trap exists. An experimental setting makes the
+loop sleep N µs after a pass that found nothing, the kickoff spin left on: 0,
+100, 500 and 2000, in alternating pairs, frame times from the performance
+panel and per-thread CPU from `hostprof.py`.
+
+- a title that slows or hangs at 2000 has a handshake that needs fast
+  polling, and the counters name it;
+- a title that does not change is safe at that safety-net period;
+- titles whose renderer has the kickoff hook, against one without, show what
+  the flush trap has to replace.
+
+### Clocks and DPCs
+
+- how long DPCs hold the timer thread (maximum and histogram), and the
+  `KeStallExecutionProcessor` calls made on it;
+- the guest code that waits on `KeTickCount` or the APU sample counter, and
+  the thread it runs on. One such wait in a DPC confirms the clock thread;
+  none in five titles allows the timer thread after all;
+- the value `SetupVoiceProcessor` waits for and how long that takes today,
+  for the counter's rate.
+
+### Baseline
+
+Before phase 1, per title at its spot: frame-time percentiles, per-thread CPU
+and the counters. Numbers are quoted from runs with the counters off, and not
+from the seconds after a movie, when the graphics card is still clocking up.
+
 ## Phases
 
 Each phase is its own commit with its own A/B check (switch off and on, in
@@ -179,10 +262,9 @@ a loop that still catches whatever it misses.
    register. Independent of the rest, and most of the 25%.
 2. **Clocks to the clock thread.** `KeTickCount`, MCPX and frame counters move
    off the loop; the counters follow time.
-3. **Measure.** Count the title's writes to each page above, per frame, and
-   time one trapped write (two exceptions and two `VirtualProtect` calls with
-   the current single-step handlers). A page written too often is not
-   trapped, and its row goes back to the safety net with the reason.
+3. **Measure** (see [Measurements](#measurements)). A page written too often
+   is not trapped, and its row goes back to the safety net with the reason.
+   The counters and the baseline come before phase 1.
 4. **The aperture as a section** with the host view; the toolkit's writes move
    to it. PGRAPH's open-the-page windows go.
 5. **Trap the writes, still polling.** Flush, `PUT` and interrupt status are
