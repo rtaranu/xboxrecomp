@@ -8,9 +8,11 @@
  *
  * One process per mode, because the switch is read once:
  *
- *   default        No switch set. Pins what every title gets today: the guest
- *                  address goes to Win32 as a HANDLE, so a set is lost and a
- *                  wait fails instead of reporting the event's state.
+ *   default        No switch set. An event the title has never set goes to
+ *                  Win32 as a HANDLE, so a wait on it fails instead of
+ *                  reporting its state. The title's first KeSetEvent on an
+ *                  event makes it a host event (D3D sets its far-fence and
+ *                  vertical-blank events this way), and waits then see it.
  *   title-kevents  RECOMP_TITLE_KEVENTS=1. Each check fails without it:
  *
  *   1. A synchronization event that is not set times out.
@@ -222,11 +224,15 @@ int main(int argc, char **argv)
     build_event(NOTIF_VA, 0, 0);
 
     if (!on) {
-        ke_set(SYNC_VA);
-        st = ke_wait(SYNC_VA);
+        st = ke_wait(NOTIF_VA);
         snprintf(d, sizeof d, "status 0x%08X", st);
         check(st != 0 && st != STATUS_TIMEOUT,
-              "default: a title-built event is not a host event (the wait fails)", d);
+              "default: an event the title never set is not a host event (the wait fails)", d);
+        ke_set(SYNC_VA);
+        st = ke_wait(SYNC_VA);
+        snprintf(d, sizeof d, "status 0x%08X, SignalState %u", st, G(SYNC_VA)[1]);
+        check(st == 0 && G(SYNC_VA)[1] == 0,
+              "default: an event the title sets is an event; the wait consumes it", d);
     } else {
         /* 1. Not set: times out. */
         st = ke_wait(SYNC_VA);
