@@ -4212,15 +4212,78 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
     return 1;
 }
 
+/* The title's graphics objects, read back from where it put them. Instance
+ * memory is at 0x700000 of the aperture; the object table in it (PFIFO
+ * 0x2210 gives its place and size) pairs a handle with an instance, and an
+ * instance's first word carries its class. A handle is looked up a few
+ * times a run, so the table is searched rather than hashed. 0: not there. */
+#define NV_RAMIN 0x700000u
+static uint32_t object_instance(uint32_t handle)
+{
+    volatile uint32_t *ht = xbox_Nv2aRegPtr(0x002210);
+    uint32_t base, size, i;
+
+    if (!ht)
+        return 0;
+    base = NV_RAMIN + (((*ht >> 4) & 0x1Fu) << 12);
+    size = 0x1000u << ((*ht >> 16) & 3u);
+    for (i = 0; i < size; i += 8) {
+        volatile uint32_t *e = xbox_Nv2aRegPtr(base + i);
+
+        if (!e || !xbox_Nv2aRegPtr(base + i + 4))
+            break;
+        if (e[0] == handle && (e[1] & 0x80000000u))
+            return NV_RAMIN + ((e[1] & 0xFFFFu) << 4);
+    }
+    return 0;
+}
+
+/* The semaphore's memory object (SET_CONTEXT_DMA_SEMAPHORE, 0x1A4): where it
+ * starts in guest memory and its last byte's offset. 0: none, or not a
+ * linear object that is present. */
+static uint32_t s_sem_base, s_sem_limit;
+
+static void semaphore_object(uint32_t handle)
+{
+    uint32_t inst = object_instance(handle), base = 0, limit = 0;
+    volatile uint32_t *o = inst ? xbox_Nv2aRegPtr(inst) : NULL;
+
+    if (o && xbox_Nv2aRegPtr(inst + 8) && (o[0] & 0x3000u) == 0x3000u) {
+        /* flags with the start's offset in its page; the limit; the page */
+        uint32_t phys = (o[2] & ~0xFFFu) + (o[0] >> 20);
+
+        base = XBOX_CONTIG_BASE | (phys & 0x0FFFFFFFu);
+        limit = o[1];
+    }
+    if (base != s_sem_base || limit != s_sem_limit)
+        fprintf(stderr, "[PB] semaphore object 0x%X: 0x%08X, limit 0x%X%c",
+                handle, base, limit, 10);
+    s_sem_base = base;
+    s_sem_limit = limit;
+}
+
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
-    /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
-     * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
-     * held 0xFF000000 at times, which put the write outside guest memory). */
-    if (subch == 0 && method == 0x1D70 && s_sem_va) {
-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-        *(volatile uint32_t *)(mem + s_sem_va) = param;
-        return;
+    if (subch == 0 && method == 0x01A4)
+        semaphore_object(param);
+    /* BACK_END_WRITE_SEMAPHORE_RELEASE: the value goes to the semaphore
+     * object at SET_SEMAPHORE_OFFSET. A project that named the word itself
+     * (nv2a_pb_set_semaphore_target) is served when the commands did not. */
+    if (subch == 0 && method == 0x1D70) {
+        uint32_t off = s_reg[0x1D6C / 4], va = s_sem_va;
+        static int refused;
+
+        if (s_sem_base && off <= s_sem_limit && s_sem_limit - off >= 3u
+                && guest_span_ok((uint64_t)s_sem_base + off, 4))
+            va = s_sem_base + off;
+        if (va) {
+            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+            *(volatile uint32_t *)(mem + va) = param;
+            return;
+        }
+        if (s_sem_base && refused++ < 4)
+            fprintf(stderr, "[PB] semaphore release refused: offset 0x%X"
+                    " past limit 0x%X%c", off, s_sem_limit, 10);
     }
     if (!s_exec_inited) {
         s_exec_inited = 1;
@@ -4310,7 +4373,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 
         if (!r)
             return;
-        if (!s_sem_va) {
+        if (!s_sem_va && !s_sem_base) {
             uint32_t va = xbox_Nv2aFenceWordVa();
 
             if (va) {
