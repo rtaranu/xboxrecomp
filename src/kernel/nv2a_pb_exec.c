@@ -4706,6 +4706,9 @@ static uint32_t object_instance(uint32_t handle)
     return 0;
 }
 
+/* The class of the object each subchannel has (method 0); 0 if unknown. */
+static uint32_t s_subch_class[8];
+
 /* The semaphore's memory object (SET_CONTEXT_DMA_SEMAPHORE, 0x1A4): where it
  * starts in guest memory and its last byte's offset. 0: none, or not a
  * linear object that is present. */
@@ -4734,6 +4737,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
     if (s_capture)
         s_capture->word(subch, method, param);
+    if (method == 0) {
+        uint32_t inst = object_instance(param);
+        volatile uint32_t *o = inst ? xbox_Nv2aRegPtr(inst) : NULL;
+
+        s_subch_class[subch & 7u] = o ? (*o & 0xFFFu) : 0;
+    }
     if (subch == 0 && method == 0x01A4)
         semaphore_object(param);
     /* BACK_END_WRITE_SEMAPHORE_RELEASE: the value goes to the semaphore
@@ -4810,18 +4819,17 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         tex_stage_method(method, param);
         return;
     }
-    /* XDK D3D's KickOff (found in a title's statically linked D3D, which
-     * reads it back; see d3d8ltcg-device-context.md) ends every kick with
-     * method 0x0310 on subchannel 5:
+    /* The pattern object's first colour (class 0x44 or 0x18, method 0x310)
+     * is kept in PGRAPH 0x400B10. XDK 5849's D3D draws no patterns and uses
+     * the register as a marker: its KickOff (see d3d8ltcg-device-context.md)
+     * sends, before every semaphore release,
      *
      *     ((pushbuffer_address * 8 | (fence & 0x1F)) << 2) | (wrap & 3)
      *
-     * The GPU latches it into PGRAPH 0x400B10, and D3D waits there for the
-     * kick's fence bits. Unmodelled, 0x400B10 read 0 and the wait ended only
-     * when the semaphore happened to be a multiple of 32. (DMA_GET, which D3D
-     * reads next, is published by the walk itself; see nv2a_pb_scan.c. The
-     * marker's own address is behind the executor's read position, so it is
-     * not used for that.)
+     * and reads it back for how far the GPU has got, waiting until its fence
+     * bits and the semaphore agree. Unmodelled, 0x400B10 read 0 and that wait
+     * ended only when the semaphore happened to be a multiple of 32. The
+     * register's address is known from that D3D alone.
      *
      * D3D compares the latch's fence bits with the semaphore, so the two have
      * to tell the same story. When a back end names the semaphore the
@@ -4834,11 +4842,16 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
      * enter it. So for a mirrored fence the latch carries the mirror's fence
      * bits and the marker's address, which is what a GPU that had consumed
      * everything would report. */
-    if (method == 0x0310 && subch == 5 && nv2a_pb_dma_walk()) {
+    if (method == 0x0310 && (s_subch_class[subch & 7u] == 0x44u
+                             || s_subch_class[subch & 7u] == 0x18u)) {
         volatile uint32_t *r = xbox_Nv2aRegPtr(0x400B10);
+        static int said;
 
         if (!r)
             return;
+        if (!said++)
+            fprintf(stderr, "[PB] pattern colour kept in PGRAPH 0x400B10"
+                    " (subchannel %u)%c", subch, 10);
         if (!s_sem_va && !s_sem_base) {
             uint32_t va = xbox_Nv2aFenceWordVa();
 
