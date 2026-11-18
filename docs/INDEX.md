@@ -47,6 +47,7 @@ One per stage, in the order you run them.
 - [NV2A Shader Translation](technical/nv2a-shaders.md) — Register combiners and vertex microcode to HLSL
 - [D3D8LTCG Device Context](technical/d3d8ltcg-device-context.md) — Device field map, PB ring management, stub calling conventions
 - [Pushbuffer Executor](technical/pushbuffer-executor.md) — Executing a statically linked XDK D3D title's pushbuffer: DMA-engine walk, answering the title, fixed-function transform and lighting, anti-aliased surfaces, render back ends
+- [The NV2A Ack Thread](technical/nv2a-ack-thread.md) — The thread that plays the GPU's part, why it holds a core, and a design to make it react instead of poll (to do)
 
 ### Microsoft's own recompiler
 
