@@ -489,6 +489,10 @@ int nv2a_pb_dma_walk(void)
 static int s_in_call;
 int nv2a_pb_scan_in_call(void) { return s_in_call; }
 
+/* Where the last top-level JUMP of a scan pointed (0: none), for
+ * nv2a_pb_scan_wrap. */
+static uint32_t s_jump_va;
+
 static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                                 uint32_t *jumps, uint32_t *unknown)
 {
@@ -508,8 +512,10 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
                                              : (w & 0x1FFFFFFCu);
             (*jumps)++;
-            if (!in_call)
-                break;                        /* the ring: a jump ends it */
+            if (!in_call) {                   /* the ring: a jump ends it */
+                s_jump_va = 0x80000000u | (target & 0x0FFFFFFFu);
+                break;
+            }
             va = 0x80000000u | (target & 0x0FFFFFFFu);
             end_va = va + 0x400000u;
             continue;
@@ -571,4 +577,23 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
     s_tot_unknown += unknown;
     s_tot_jumps += jumps;
     s_tot_segments++;
+}
+
+/* PUT came back below where it was: the ring wrapped. The title left a JUMP
+ * to the ring's start where it stopped writing, so walk up to that JUMP and
+ * carry on from its target to PUT, as the GPU does. Returns 0 when no JUMP
+ * turned up, and the caller falls back to the bounds it has learned.
+ *
+ * The lowest PUT ever seen is not the ring's start once a title has made a
+ * second device: Halo's first pushbuffer sat below its second, in memory
+ * the game then filled with map data, and every wrap walked that data as
+ * commands. */
+int nv2a_pb_scan_wrap(uint32_t start_va, uint32_t put_va)
+{
+    s_jump_va = 0;
+    nv2a_pb_scan_segment(start_va, start_va + 0x400000u);
+    if (!s_jump_va)
+        return 0;
+    nv2a_pb_scan_segment(s_jump_va, put_va);
+    return 1;
 }
