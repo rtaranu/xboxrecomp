@@ -4431,9 +4431,18 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             fprintf(stderr, "[FTRACE] color offset -> %08X%c", param, 10);
         s_gpu.color_offset = param;
         break;
-    case NV097_SET_COLOR_CLEAR_VALUE:
+    case NV097_SET_COLOR_CLEAR_VALUE: {
+        /* Latched in PGRAPH 0x40186C. D3D's graphics interrupt handler (all
+         * five XDKs here, 3925 to 5849) sends this and ZSTENCIL_CLEAR_VALUE
+         * as a pair before a software method and reads them back from these
+         * registers: a register to write and its value, or a callback and
+         * its argument. */
+        volatile uint32_t *r = xbox_Nv2aRegPtr(0x40186C);
         s_gpu.clear_color = param;
+        if (r)
+            *r = param;
         break;
+    }
     case NV097_SET_BLEND_ENABLE:
         s_gpu.blend_enable = param;
         break;
@@ -4749,8 +4758,9 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case 0x035C: s_gpu.depth_mask = param; break; /* DEPTH_MASK */
     case 0x0214: s_gpu.zeta_offset = param; break;/* SURFACE_ZETA_OFFSET */
     case 0x1D8C: {                        /* ZSTENCIL_CLEAR_VALUE */
-        /* Latched in PGRAPH 0x401A88, where XDK 3925's software-method
-         * handler reads the address of the buffer to flip to. */
+        /* Latched in PGRAPH 0x401A88, where D3D's software-method handler
+         * reads the buffer to flip to (XDK 3925), the register a method
+         * writes or the callback to call (see COLOR_CLEAR_VALUE). */
         volatile uint32_t *r = xbox_Nv2aRegPtr(0x401A88);
         s_gpu.zstencil_clear = param;
         if (r)
