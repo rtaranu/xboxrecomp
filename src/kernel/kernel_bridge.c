@@ -2088,6 +2088,7 @@ static HANDLE ke_shadow_lookup(uint32_t guest_va);
 static void ke_shadow_insert(uint32_t guest_va, HANDLE host);
 static HANDLE bridge_resolve_handle(uint32_t token);
 static HANDLE ke_guest_event(uint32_t guest_va, int *type);
+static void ke_title_event_set(uint32_t guest_va);
 
 /* Bring a header-owned host event in line with guest SignalState before a
  * wait. Explicitly initialized shadows keep their existing host-state policy. */
@@ -2129,6 +2130,7 @@ static void bridge_KeSetEvent(void)
     (void)increment;
     (void)wait;
 
+    ke_title_event_set(guest_va);
     {   /* An event the title built itself (see ke_guest_event). */
         int type;
         HANDLE ge = ke_guest_event(guest_va, &type);
@@ -8085,10 +8087,11 @@ static void ke_shadow_remove(uint32_t guest_va)
  * once now blocks until the event is set, and on a title whose setter the
  * runtime does not model yet (a GPU interrupt, say) that turns a spin into a
  * hang. Turn it on for a title that waits on events it built itself. */
-/* Title-built events whose setter the runtime models (D3D's software-method
- * wake, nv2a_pb_set_wake_event): they take the path below whatever
- * RECOMP_TITLE_KEVENTS says. */
-#define KE_TITLE_EVENTS_MAX 4
+/* Title-built events whose setter is known: the runtime's (D3D's
+ * software-method wake, nv2a_pb_set_wake_event), or the title's own KeSetEvent
+ * (ke_title_event_set). They take the path below whatever RECOMP_TITLE_KEVENTS
+ * says. */
+#define KE_TITLE_EVENTS_MAX 32
 static volatile uint32_t g_ke_title_events[KE_TITLE_EVENTS_MAX];
 
 void xbox_RegisterTitleEvent(uint32_t guest_va)
@@ -8110,10 +8113,44 @@ static int ke_title_event_registered(uint32_t guest_va)
     return 0;
 }
 
+/* Whether guest_va holds an event's header (Type 0 notification or 1
+ * synchronization, Size 4 dwords) in RAM or the contiguous window. */
+static int ke_event_header(uint32_t guest_va, int *type)
+{
+    uint32_t hdr;
+
+    if (guest_va < 0x10000u || (guest_va & 3u))
+        return 0;
+    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u))
+        return 0;
+    hdr = BRIDGE_MEM32(guest_va);
+    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
+        return 0;
+    *type = (int)(hdr & 0xFFu);
+    return 1;
+}
+
+/* KeSetEvent from the title on an event it built: on the console the kernel
+ * sets the header, and the title's waits see it. D3D's graphics interrupt
+ * handler sets its far-fence event (software method 5) and its vertical-blank
+ * event this way; with neither registered, D3D's
+ * "while (KeWaitForSingleObject(...))" never ended (Burnout 3 froze in its
+ * menus on the DMA walk with the interrupt on). Only events the title sets:
+ * those the runtime alone completes (a read's, say) keep the old path, where
+ * a wait fails at once, until their setter writes the header too. */
+static void ke_title_event_set(uint32_t guest_va)
+{
+    int type;
+
+    if (!ke_title_event_registered(guest_va) && ke_event_header(guest_va, &type)
+            && !ke_shadow_lookup(guest_va))
+        xbox_RegisterTitleEvent(guest_va);
+}
+
 static HANDLE ke_guest_event(uint32_t guest_va, int *type)
 {
     static int enabled = -1;
-    uint32_t hdr, i;
+    uint32_t i;
     HANDLE h = NULL;
 
     if (enabled < 0) {
@@ -8122,14 +8159,8 @@ static HANDLE ke_guest_event(uint32_t guest_va, int *type)
     }
     if (!enabled && !ke_title_event_registered(guest_va))
         return NULL;
-    if (guest_va < 0x10000u || (guest_va & 3u))
-        return NULL;
-    if (guest_va >= 0x04000000u && (guest_va < 0x80000000u || guest_va >= 0x84000000u))
-        return NULL;                               /* RAM or the contiguous window */
-    hdr = BRIDGE_MEM32(guest_va);
-    if (((hdr & 0xFFu) != 0 && (hdr & 0xFFu) != 1) || ((hdr >> 16) & 0xFFu) != 4)
-        return NULL;
-    *type = (int)(hdr & 0xFFu);
+    if (!ke_event_header(guest_va, type))
+        return NULL;                               /* not an event in RAM */
 
     ke_shadow_init();
     EnterCriticalSection(&g_ke_shadow_cs);
