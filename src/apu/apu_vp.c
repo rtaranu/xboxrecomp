@@ -89,6 +89,111 @@ void apu_ssl_logf(const char *fmt, ...)
 }
 
 /* ============================================================
+ * Race counters (apu_state.h)
+ * ============================================================ */
+
+volatile LONG apu_race[APU_RACE_KINDS];
+
+static const char *const s_race_name[APU_RACE_KINDS] = {
+    "voice method during the voice's frame",
+    "idle trap for a starting voice",
+    "play offset overwritten",
+    "envelope count overwritten",
+    "envelope phase overwritten",
+    "interrupt pending with the line down",
+    "interrupt line up with nothing pending",
+};
+
+void apu_race_note(MCPXAPUState *d, int kind, unsigned v)
+{
+    if (InterlockedIncrement(&apu_race[kind]) != 1)
+        return;
+    if (v < MCPX_HW_MAX_VOICES)
+        apu_trace("[APU-RACE] first %s: voice %u, frame %u\n",
+                  s_race_name[kind], v, apu_irq_stats.se_frames);
+    else
+        apu_trace("[APU-RACE] first %s: frame %u\n",
+                  s_race_name[kind], apu_irq_stats.se_frames);
+    if (kind != APU_RACE_BUSY && apu_env_on("RECOMP_APU_RACE_DUMP"))
+        mcpx_apu_vp_dump(d, s_race_name[kind]);
+}
+
+/* VOICE_ON's window, for idle-on's expected rate: the walk passes a voice
+ * once a frame (667 us), so a start is caught about window / 667 us of the
+ * time. Starts, and the time each voice was listed and not yet active, in
+ * host counter ticks (the two timestamps add about 50 ns). */
+static volatile LONG s_on_starts, s_on_ticks, s_on_max;
+
+static void race_on_window(LONGLONG t0)
+{
+    LARGE_INTEGER t1;
+    LONG ticks;
+
+    QueryPerformanceCounter(&t1);
+    ticks = (LONG)(t1.QuadPart - t0);
+    InterlockedIncrement(&s_on_starts);
+    InterlockedExchangeAdd(&s_on_ticks, ticks);
+    if (ticks > s_on_max)
+        s_on_max = ticks;
+}
+
+/* Every 5 s of frames, while a count has moved. */
+static void apu_race_report(void)
+{
+    static unsigned frames;
+    static LONG shown;
+    LARGE_INTEGER freq;
+    LONG starts = s_on_starts, sum = starts;
+    double ns;
+
+    if (++frames % 7500)
+        return;
+    for (int k = 0; k < APU_RACE_KINDS; k++)
+        sum += apu_race[k];
+    if (sum == shown)
+        return;
+    shown = sum;
+    QueryPerformanceFrequency(&freq);
+    ns = 1e9 / (double)freq.QuadPart;
+    apu_trace("[APU-RACE] busy %ld idle-on %ld offset %ld env-count %ld"
+              " env-phase %ld irq-down %ld irq-up %ld;"
+              " starts %ld window mean %.0f max %.0f ns\n",
+              (long)apu_race[APU_RACE_BUSY], (long)apu_race[APU_RACE_IDLE_ON],
+              (long)apu_race[APU_RACE_CBO], (long)apu_race[APU_RACE_ENV_COUNT],
+              (long)apu_race[APU_RACE_ENV_PHASE],
+              (long)apu_race[APU_RACE_IRQ_DOWN], (long)apu_race[APU_RACE_IRQ_UP],
+              (long)starts, starts ? s_on_ticks * ns / starts : 0.0,
+              s_on_max * ns);
+}
+
+/* RECOMP_APU_RACE_WIDEN=<us>: hold the races' windows open, to reproduce
+ * one and to prove a fix. VOICE_ON waits that long between listing its
+ * voice and making it active; the frame thread waits 1 us before each
+ * write-back. It changes timing on purpose. s_race_hook is for the tests. */
+enum { RACE_W_ON, RACE_W_CBO, RACE_W_ENV };
+static int s_race_widen = -1;
+static void (*s_race_hook)(MCPXAPUState *d, int window, uint16_t v);
+
+static void race_window(MCPXAPUState *d, int window, uint16_t v)
+{
+    if (s_race_hook) {
+        s_race_hook(d, window, v);
+        return;
+    }
+    if (s_race_widen < 0) {
+        const char *e = getenv("RECOMP_APU_RACE_WIDEN");
+        int us = e ? atoi(e) : 0;
+        s_race_widen = us < 0 ? 0 : us > 5000 ? 5000 : us;
+    }
+    if (s_race_widen) {
+        int64_t until = qemu_clock_get_us(QEMU_CLOCK_REALTIME)
+                      + (window == RACE_W_ON ? s_race_widen : 1);
+        while (qemu_clock_get_us(QEMU_CLOCK_REALTIME) < until)
+            ;
+    }
+}
+
+/* ============================================================
  * Voice list register table
  * ============================================================ */
 
@@ -258,10 +363,24 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
  * Front-End method dispatch
  * ============================================================ */
 
+/* A title's method writes voice v: is the frame thread on that voice? */
+static void race_busy(MCPXAPUState *d, unsigned v)
+{
+    if (v < MCPX_HW_MAX_VOICES && d->vp.voice_spin[v])
+        apu_race_note(d, APU_RACE_BUSY, v);
+}
+
 static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 {
     unsigned int slot;
     unsigned int selected_handle, list;
+
+    /* VOICE_ON and VOICE_RELEASE check after their lock, which waits. */
+    if (method == NV1BA0_PIO_VOICE_OFF || method == NV1BA0_PIO_VOICE_PAUSE)
+        race_busy(d, argument & NV1BA0_PIO_VOICE_OFF_HANDLE);
+    else if (method >= NV1BA0_PIO_SET_VOICE_CFG_VBIN
+             && method <= NV1BA0_PIO_SET_VOICE_CFG_BUF_EBO)
+        race_busy(d, d->regs[NV_PAPU_FECV] & 0xFFFF);
 
     if (method == NV1BA0_PIO_VOICE_ON || method == NV1BA0_PIO_VOICE_OFF ||
             method == NV1BA0_PIO_VOICE_RELEASE || method == NV1BA0_PIO_VOICE_PAUSE) {
@@ -286,6 +405,9 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
+        race_busy(d, selected_handle);
+        if (selected_handle < MCPX_HW_MAX_VOICES)
+            d->vp.voice_starting[selected_handle] = 1;
 
         list = GET_MASK(d->regs[NV_PAPU_FEAV], NV_PAPU_FEAV_LST);
         if (list != NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_INHERIT) {
@@ -312,6 +434,10 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
                            NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE,
                            selected_handle);
         }
+        /* Listed and not yet active: the voice walk takes it for idle. */
+        LARGE_INTEGER listed_at;
+        QueryPerformanceCounter(&listed_at);
+        race_window(d, RACE_W_ON, (uint16_t)selected_handle);
 
         if (apu_ssl_log_voice(selected_handle))
             apu_ssl_logf("v%u on", selected_handle);
@@ -363,6 +489,9 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
         voice_reset_filters(d, (uint16_t)selected_handle);
         voice_set_mask(d, (uint16_t)selected_handle, NV_PAVS_VOICE_PAR_STATE,
                        NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE, 1);
+        race_on_window(listed_at.QuadPart);
+        if (selected_handle < MCPX_HW_MAX_VOICES)
+            d->vp.voice_starting[selected_handle] = 0;
 
         if (!locked) voice_lock(d, (uint16_t)selected_handle, false);
         break;
@@ -373,6 +502,7 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
         bool locked = is_voice_locked(d, (uint16_t)selected_handle);
         if (!locked) voice_lock(d, (uint16_t)selected_handle, true);
+        race_busy(d, selected_handle);
 
         uint16_t rr;
         rr = (uint16_t)voice_get_mask(d, (uint16_t)selected_handle,
@@ -707,6 +837,20 @@ static hwaddr get_data_ptr(hwaddr sge_base, unsigned int max_sge, uint32_t addr)
  * Envelope processing
  * ============================================================ */
 
+/* Before an envelope step writes: a title's VOICE_ON or RELEASE that landed
+ * since the step read the phase (and the count; -1 when it read none) is
+ * about to be overwritten. */
+static void env_race_check(MCPXAPUState *d, uint16_t v, uint32_t cur_mask,
+                           uint8_t cur, uint32_t count_mask, int count,
+                           bool writes_phase)
+{
+    race_window(d, RACE_W_ENV, v);
+    if (voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask) != cur
+            || (count >= 0 && voice_get_mask(d, v, NV_PAVS_VOICE_CUR_ECNT,
+                                             count_mask) != (uint32_t)count))
+        apu_race_note(d, writes_phase ? APU_RACE_ENV_PHASE : APU_RACE_ENV_COUNT, v);
+}
+
 static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
                            uint32_t reg_a, uint32_t rr_reg, uint32_t rr_mask,
                            uint32_t lvl_reg, uint32_t lvl_mask,
@@ -715,6 +859,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
     uint8_t cur = (uint8_t)voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask);
     switch (cur) {
     case NV_PAVS_VOICE_PAR_STATE_EFCUR_OFF:
+        env_race_check(d, v, cur_mask, cur, count_mask, -1, false);
         voice_set_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask, 0);
         voice_set_mask(d, v, lvl_reg, lvl_mask, 0xFF);
         return 1.0f;
@@ -723,6 +868,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
         uint16_t count =
             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask);
         voice_set_mask(d, v, lvl_reg, lvl_mask, 0x00);
+        env_race_check(d, v, cur_mask, cur, count_mask, count, count == 0);
         if (count == 0) {
             cur++;
             voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask, cur);
@@ -749,6 +895,8 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
             }
         }
         voice_set_mask(d, v, lvl_reg, lvl_mask, (uint32_t)value);
+        env_race_check(d, v, cur_mask, cur, count_mask, count,
+                       count == (uint32_t)(attack_rate * 16));
         if (count == (uint32_t)(attack_rate * 16)) {
             cur++;
             voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask, cur);
@@ -766,6 +914,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
         uint16_t count =
             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask);
         voice_set_mask(d, v, lvl_reg, lvl_mask, 0xFF);
+        env_race_check(d, v, cur_mask, cur, count_mask, count, count == 0);
         if (count == 0) {
             cur++;
             voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask, cur);
@@ -793,7 +942,9 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
             value = 255.0f * powf(0.99988799f, (decay_rate * 16 - count) *
                                                    4096.0f / decay_rate);
         }
-        if (value <= (sustain_level + 0.2f) || (value > 255.0f)) {
+        bool ends = value <= (sustain_level + 0.2f) || (value > 255.0f);
+        env_race_check(d, v, cur_mask, cur, count_mask, count, ends);
+        if (ends) {
             cur++;
             voice_set_mask(d, v, NV_PAVS_VOICE_PAR_STATE, cur_mask, cur);
         } else {
@@ -807,6 +958,7 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
     case NV_PAVS_VOICE_PAR_STATE_EFCUR_SUSTAIN: {
         uint8_t sustain_level =
             (uint8_t)voice_get_mask(d, v, reg_a, NV_PAVS_VOICE_CFG_ENVA_EA_SUSTAINLEVEL);
+        env_race_check(d, v, cur_mask, cur, count_mask, -1, false);
         voice_set_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask, 0x00);
         voice_set_mask(d, v, lvl_reg, lvl_mask, sustain_level);
         return sustain_level / 255.0f;
@@ -816,6 +968,8 @@ static float voice_step_envelope(MCPXAPUState *d, uint16_t v, uint32_t reg_0,
         uint16_t count =
             (uint16_t)voice_get_mask(d, v, NV_PAVS_VOICE_CUR_ECNT, count_mask);
         uint16_t release_rate = (uint16_t)voice_get_mask(d, v, rr_reg, rr_mask);
+        env_race_check(d, v, cur_mask, cur, count_mask, count,
+                       release_rate == 0 || count == 0);
         if (release_rate == 0) count = 0;
         float value = 0;
         if (count == 0) {
@@ -1202,6 +1356,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
                                   NV_PAVS_VOICE_PAR_NEXT_EBO);
     uint32_t cbo = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
                                   NV_PAVS_VOICE_PAR_OFFSET_CBO);
+    uint32_t cbo_seen = cbo;    /* what the field holds, as far as this knows */
     uint32_t lbo = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CUR_PSH_SAMPLE,
                                   NV_PAVS_VOICE_CUR_PSH_SAMPLE_LBO);
     uint32_t ba = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CUR_PSL_START,
@@ -1272,7 +1427,7 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
             d->vp.ssl[v].ssl_seg = 0;
             voice_set_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
                            NV_PAVS_VOICE_PAR_OFFSET_CBO, 0);
-            cbo = 0;
+            cbo = cbo_seen = 0;
             page = d->vp.ssl[v].base[ssl_index];
             count = d->vp.ssl[v].count[ssl_index];
         }
@@ -1466,6 +1621,11 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         }
     }
 
+    /* A title's seek or VOICE_ON since the offset was read is lost here. */
+    race_window(d, RACE_W_CBO, (uint16_t)v);
+    if (voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
+                       NV_PAVS_VOICE_PAR_OFFSET_CBO) != cbo_seen)
+        apu_race_note(d, APU_RACE_CBO, v);
     voice_set_mask(d, (uint16_t)v, NV_PAVS_VOICE_PAR_OFFSET,
                    NV_PAVS_VOICE_PAR_OFFSET_CBO, cbo);
     return sample_count;
@@ -1957,6 +2117,7 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
      * after the voice trapped last time. */
     uint16_t first_idle = 0xFFFF, next_idle = 0xFFFF;
     bool past_last = d->vp.idle_trap_last == 0xFFFF;
+    bool first_starting = false, next_starting = false;
 
     memset(d->vp.sample_buf, 0, sizeof(d->vp.sample_buf));
 
@@ -1978,12 +2139,19 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
             d->regs[next] = voice_get_mask(d, v, NV_PAVS_VOICE_TAR_PITCH_LINK,
                                NV_PAVS_VOICE_TAR_PITCH_LINK_NEXT_VOICE_HANDLE);
 
+            /* Read before the active bit: VOICE_ON clears it after. */
+            bool starting = v < MCPX_HW_MAX_VOICES && d->vp.voice_starting[v];
+
             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
-                if (first_idle == 0xFFFF)
+                if (first_idle == 0xFFFF) {
                     first_idle = v;
-                if (past_last && next_idle == 0xFFFF)
+                    first_starting = starting;
+                }
+                if (past_last && next_idle == 0xFFFF) {
                     next_idle = v;
+                    next_starting = starting;
+                }
             } else {
                 /* Process voice directly (single-threaded) */
                 voice_spin_lock(d, v);
@@ -2010,11 +2178,19 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
         if (pick != 0xFFFF
                 && (d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE)
                        != NV_PAPU_FECTL_FEMETHMODE_TRAPPED) {
+            /* Not idle: a title's VOICE_ON had listed it and not yet made it
+             * active when the walk passed, or has made it active since. */
+            if ((d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE)
+                    && ((next_idle != 0xFFFF ? next_starting : first_starting)
+                        || voice_get_mask(d, pick, NV_PAVS_VOICE_PAR_STATE,
+                                          NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)))
+                apu_race_note(d, APU_RACE_IDLE_ON, pick);
             fe_method(d, SE2FE_IDLE_VOICE, pick);
             d->vp.idle_trap_last = pick;
         }
     }
 
+    apu_race_report();
     vp_trace_positions(d);
     vp_audit(d);
     vp_stat_report();
