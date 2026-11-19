@@ -526,6 +526,8 @@ void mcpx_apu_write(void *opaque, hwaddr addr, uint64_t val,
                 && ((uint32_t)val & NV_PAPU_FECTL_FEMETHMODE)
                    != NV_PAPU_FECTL_FEMETHMODE_TRAPPED)
             apu_ssl_logf("fe resumed");
+        if (addr == NV_PAPU_SECTL && apu_ssl_log_on())
+            apu_ssl_logf("SECTL %08X", (uint32_t)val);
         qatomic_set(&d->regs[addr], (uint32_t)val);
         /* Starting the APU has to start the frame thread.
          *
