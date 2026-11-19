@@ -89,6 +89,11 @@ yet; "fork-only" stays here. Not listed: the commits adding this file and
 | 6a0aaa7 | docs: NV2A ack thread design, gaps a review found | not sent (with the above) |
 | d01b97a | docs: NV2A ack thread, what to measure before building | not sent (with the above) |
 | 283412b | apu: only a trap writes FEDECMETH/FEDECPARAM | not sent (a crash fix; candidate on its own) |
+| 307ea96 | apu: count the races between a title's methods and the frame thread | fork-only (debug; goes when the races are fixed) |
+| cf39032 | apu: the [SSL] log shows each sequencer control write | fork-only (debug) |
+| f85971b | apu: count the sequencer holds that run out (RECOMP_APU_SEQ_HOLD_US) | not sent (candidate: a hole in the sound that nothing reported) |
+| e641c9e | apu: RECOMP_APU_SSL_TICK=0, no sample-limit interrupt | not sent (what the hardware raises the bit for is unchecked) |
+| d0d502b | kernel: an image page the title asks the physical address of is RAM | not sent (candidate; mem2 may make it moot) |
 
 ## Work in flight
 
