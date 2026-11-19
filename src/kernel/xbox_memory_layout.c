@@ -1777,19 +1777,6 @@ void xbox_Nv2aKickAck(void)
         InterlockedExchange(&g_nv2a_kick_waiting, 0);
 }
 
-static void kick_ack_spin(void)
-{
-    uint64_t start = xbox_HostNowNs();
-
-    while (g_nv2a_kick_waiting) {
-        if (kick_ack_try() || xbox_HostNowNs() - start >= kick_spin_ns()) {
-            InterlockedExchange(&g_nv2a_kick_waiting, 0);
-            break;
-        }
-        YieldProcessor();
-    }
-}
-
 extern int nv2a_pb_exec_flip_due(uint32_t *due);
 
 int nv2a_pb_flip_present_wait(void)
@@ -1825,9 +1812,26 @@ void nv2a_pb_flip_hold_wait(void)
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    /* Since when this thread has spun on the announced kickoff. */
+    uint64_t kick_from = 0;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
-        if (g_nv2a_kick_waiting)
-            kick_ack_spin();
+        /* An announced kickoff: the loop spins on its flush bit, skipping
+         * the pass, until the flush is answered (or a held flip says it must
+         * not be) or RECOMP_KICK_SPIN_US passes. */
+        if (g_nv2a_kick_waiting) {
+            uint64_t now = xbox_HostNowNs();
+
+            if (!kick_from)
+                kick_from = now;
+            if (!kick_ack_try() && now - kick_from < kick_spin_ns()) {
+                YieldProcessor();
+                continue;
+            }
+            /* answered, held or given up */
+            InterlockedExchange(&g_nv2a_kick_waiting, 0);
+            kick_from = 0;
+        }
+
         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
          * which is how the title feels the console's FLIP_STALL. Nothing is
