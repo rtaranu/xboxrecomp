@@ -1301,24 +1301,69 @@ static void se_frame(MCPXAPUState *d)
  * tone keep running, and is not held again until the VP has rendered. */
 #define APU_SEQ_HOLD_US 5000
 
+/* RECOMP_APU_SEQ_HOLD_US=<us> replaces the hold (0: none). */
+static int64_t apu_seq_hold_us(void)
+{
+    static int64_t us = -1;
+    if (us < 0) {
+        const char *e = getenv("RECOMP_APU_SEQ_HOLD_US");
+        us = e && *e ? atoll(e) : APU_SEQ_HOLD_US;
+        if (us < 0 || us > 1000000)
+            us = APU_SEQ_HOLD_US;
+    }
+    return us;
+}
+
+/* Holds that ran out: the sequencer stayed off past the hold with voices
+ * playing, so the frames until it started again went out silent, a hole in
+ * the sound each time. Counted always; "[APU-SEQ]" says so at the first and
+ * every 5 s while the count moves. */
+static struct {
+    unsigned holds, expired, silent_frames;
+    int64_t max_off_us;
+    unsigned shown;
+    int64_t shown_us;
+} s_seq;
+
+static void apu_seq_report(int64_t now_us)
+{
+    if (s_seq.expired == s_seq.shown || now_us - s_seq.shown_us < 5000000)
+        return;
+    apu_trace("[APU-SEQ] sequencer holds %u, ran out %u (%u silent frames),"
+              " longest stop %.1f ms; hold %.1f ms\n",
+              s_seq.holds, s_seq.expired, s_seq.silent_frames,
+              s_seq.max_off_us / 1000.0, apu_seq_hold_us() / 1000.0);
+    s_seq.shown = s_seq.expired;
+    s_seq.shown_us = now_us;
+}
+
 int mcpx_apu_frame_kind(MCPXAPUState *d, int64_t now_us)
 {
     int xcntmode = GET_MASK(qatomic_read(&d->regs[NV_PAPU_SECTL]),
                             NV_PAPU_SECTL_XCNTMODE);
     uint32_t fectl = qatomic_read(&d->regs[NV_PAPU_FECTL]);
 
+    apu_seq_report(now_us);
     if (xcntmode == NV_PAPU_SECTL_XCNTMODE_OFF) {
-        if (!d->seq_ran || g_test_tone.active)
+        if (!d->seq_ran || g_test_tone.active) {
+            if (d->seq_off)
+                s_seq.silent_frames++;
             return APU_FRAME_LIGHT;
+        }
         if (!d->seq_off) {
             d->seq_off = true;
             d->seq_off_us = now_us;
+            s_seq.holds++;
         }
-        if (now_us - d->seq_off_us < APU_SEQ_HOLD_US)
+        if (now_us - d->seq_off_us < apu_seq_hold_us())
             return APU_FRAME_HELD;
         d->seq_ran = false;
+        s_seq.expired++;
+        s_seq.silent_frames++;
         return APU_FRAME_LIGHT;
     }
+    if (d->seq_off && now_us - d->seq_off_us > s_seq.max_off_us)
+        s_seq.max_off_us = now_us - d->seq_off_us;
     d->seq_off = false;
     if (g_test_tone.active)
         return APU_FRAME_LIGHT;
