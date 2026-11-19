@@ -97,6 +97,14 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_ACK_HOLD_SLEEP_US` | 500 | While a flip is held, the nv2a-ack loop sleeps this long between passes instead of spinning (max 2000). `0` spins as before. | `xbox_memory_layout.c` |
 | `RECOMP_KICK_HOLD_WAIT_US` | 200 | While a flip is held, a renderer hook in front of D3D's KickOff (`nv2a_pb_flip_hold_wait`) sleeps in steps of this long until the release, instead of the title spinning on the unacknowledged PFB flush (max 2000). `0` lets it spin. | `xbox_memory_layout.c` |
 | `RECOMP_KICK_SPIN_US` | 200 | The same hook announces each kickoff; the nv2a-ack loop and the pushbuffer walker then clear its PFB flush as soon as it is set, instead of on the next pass (the ack loop spins up to this long for it, max 2000). A held flip still leaves it set. `0` turns this off. | `xbox_memory_layout.c`, `nv2a_pb_scan.c` |
+| `RECOMP_ACK_SLEEP=1` | off | The nv2a-ack thread sleeps when a pass finds nothing to do, until a kickoff is announced, instead of polling on a host core. Windows only. See `docs/technical/nv2a-ack-thread.md`. | `nv2a_ack_sleep.c` |
+| `RECOMP_ACK_SPIN_US` | 32 | Under `RECOMP_ACK_SLEEP`: how long the thread keeps polling after its last work before it sleeps (max 5000). | `nv2a_ack_sleep.c` |
+| `RECOMP_ACK_NET_US` | 1000 | Under `RECOMP_ACK_SLEEP`: the longest one sleep lasts, so work no kickoff announces is still found (100 to 20000). | `nv2a_ack_sleep.c` |
+| `RECOMP_ACK_HOLD_WAKE` | 1 | Under `RECOMP_ACK_SLEEP`, while a flip is held: the vblank that may release it wakes the thread. `0` sleeps `RECOMP_ACK_HOLD_SLEEP_US` a pass instead. | `nv2a_ack_sleep.c` |
+| `RECOMP_MCPX_COUNTER_HZ=N` | 0, or 48000 under `RECOMP_ACK_SLEEP` | The MCPX counter the nv2a-ack thread advances follows the clock at N a second. `0` adds 1 a pass, so its rate is the loop's speed. | `nv2a_ack_sleep.c` |
+| `RECOMP_ACK_CLOCK_EACH=1` | off | The nv2a-ack thread reads the vblank-held clock for every register, as before, instead of once a pass and only with a vblank bit up. For A/B runs. | `xbox_memory_layout.c` |
+| `RECOMP_ACK_STATS=<file>` | off | Appends what the nv2a-ack thread's passes found to the file every 5 s (`1` means `ack-stats.log`). | `nv2a_ack_stats.c` |
+| `RECOMP_ACK_WRITES=1` | off | With `RECOMP_ACK_STATS`: traps and counts every write to the PFB and PFIFO USER register pages, by writing instruction. Slow; Windows only. | `nv2a_ack_stats.c` |
 | `RECOMP_FFP_FLIP_NORMALS` | off | Lights the side of a fixed-function mesh that faces the viewer. Not hardware behaviour. | `nv2a_pb_exec.c` |
 | `RECOMP_CLIP_NEAR_Z` | on | `0` turns off the near-plane clip. | `nv2a_pb_exec.c` |
 | `RECOMP_SWIZZLED_RT` | on | `0` stops rendering into swizzled render targets. | `nv2a_pb_exec.c` |
