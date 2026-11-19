@@ -89,5 +89,33 @@ yet; "fork-only" stays here. Not listed: the commits adding this file and
 | 6a0aaa7 | docs: NV2A ack thread design, gaps a review found | not sent (with the above) |
 | d01b97a | docs: NV2A ack thread, what to measure before building | not sent (with the above) |
 
-Work in flight, not on this branch yet: `nv2a-ack-thread` (local), on
-d01b97a.
+## Work in flight
+
+Branches built on this one, not merged into it yet. Each is rebased onto
+`splintercell` when it moves and gets its rows in the table above when it
+lands.
+
+| Branch | Base | Where | What |
+|---|---|---|---|
+| `nv2a-ack-thread` | d01b97a | local, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
+| `mem2` | d5098a4 | local, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
+
+`mem2`, oldest first:
+
+| Commit | Change | Note |
+|---|---|---|
+| 8a4e9cc | kernel: [MEM] reports the most a title holds at once against the console's RAM | a report only; upstream candidate on its own |
+| 806a504 | kernel: [MEM] counts what the console would spend pages on | with the above |
+| 4ff42a8 | kernel: RECOMP_MIRRORS=0 leaves the RAM mirrors unmapped | opt-in; upstream candidate on its own |
+| dbdd8b1 | kernel: memory model 2, in a file of its own (not called yet) | |
+| c138e94 | kernel: RECOMP_MEM_MODEL=2 turns on memory model 2 | the hooks; unset = classic model |
+| a6e1962 | tests: memory model 2 beside the classic model | |
+| 46f8c03 | docs: memory model 2, the design and how the branch is laid out | |
+| 648d141 | nv2a: the pushbuffer scan stops at the end of the window | a fix any layout can hit |
+| 7bf34be | kernel: memory model 2 fills the contiguous window from the top | |
+| af8325c | docs: memory model 2, the window fills from the top | |
+| b6efa52 | kernel: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE when filling from the top | |
+| a179211 | docs: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE, play sessions | |
+
+Old tips kept as tags: `nv2a-ack-thread-history` (before its squash),
+`mem2-before-rebase` (09bf2ed, on c2fc4dd).
