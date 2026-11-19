@@ -116,6 +116,3 @@ lands.
 | af8325c | docs: memory model 2, the window fills from the top | |
 | b6efa52 | kernel: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE when filling from the top | |
 | a179211 | docs: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE, play sessions | |
-
-Old tips kept as tags: `nv2a-ack-thread-history` (before its squash),
-`mem2-before-rebase` (09bf2ed, on c2fc4dd).
