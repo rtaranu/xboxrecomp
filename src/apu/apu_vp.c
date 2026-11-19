@@ -261,9 +261,6 @@ static void set_hrir_coeff_tar(MCPXAPUState *d, int channel, int coeff_idx,
 static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 {
     unsigned int slot;
-
-    d->regs[NV_PAPU_FEDECMETH] = method;
-    d->regs[NV_PAPU_FEDECPARAM] = argument;
     unsigned int selected_handle, list;
 
     if (method == NV1BA0_PIO_VOICE_ON || method == NV1BA0_PIO_VOICE_OFF ||
@@ -596,6 +593,14 @@ static void fe_method(MCPXAPUState *d, uint32_t method, uint32_t argument)
 
     case SE2FE_IDLE_VOICE:
         if (d->regs[NV_PAPU_FETFORCE1] & NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE) {
+            /* The trapped method, for the ISR. Only a trap writes these: the
+             * title's PIO writes land on their own thread while the ISR runs,
+             * and one between its reads of FEDECMETH and FEDECPARAM paired the
+             * idle-voice method with a float argument as the voice (Halo
+             * indexed its voice table with it and crashed). On the console the
+             * front end decodes nothing while trapped. */
+            d->regs[NV_PAPU_FEDECMETH] = method;
+            d->regs[NV_PAPU_FEDECPARAM] = argument;
             d->regs[NV_PAPU_FECTL] &= ~NV_PAPU_FECTL_FEMETHMODE;
             d->regs[NV_PAPU_FECTL] |= NV_PAPU_FECTL_FEMETHMODE_TRAPPED;
             d->regs[NV_PAPU_FECTL] &= ~NV_PAPU_FECTL_FETRAPREASON;
