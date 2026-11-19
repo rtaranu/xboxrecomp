@@ -432,6 +432,7 @@ typedef struct MCPXAPUVPState {
     volatile LONG voice_spin[MCPX_HW_MAX_VOICES];   /* see voice_spin_lock */
     uint16_t last_cmd[MCPX_HW_MAX_VOICES];   /* last VOICE_ON/OFF/RELEASE/PAUSE */
     int64_t last_cmd_us[MCPX_HW_MAX_VOICES]; /* and when (mcpx_apu_vp_dump) */
+    volatile uint8_t voice_starting[MCPX_HW_MAX_VOICES]; /* inside VOICE_ON */
 
     struct {
         int current_entry;
@@ -622,6 +623,25 @@ typedef struct {
     unsigned fe_trapped_frames; /* frames that found FECTL trapped */
 } ApuIrqStats;
 extern ApuIrqStats apu_irq_stats;
+
+/* Races between a title's thread and the frame thread, counted where one
+ * can be seen. Nothing takes one lock around a voice method and a voice's
+ * frame, so a method can land while the frame thread works on its voice.
+ * The first of each kind logs a line ("[APU-RACE]") and the totals follow
+ * every 5 s while they change. RECOMP_APU_RACE_DUMP=1 adds a voice dump to
+ * each first. BUSY counts overlaps; the others count damage. */
+enum {
+    APU_RACE_BUSY,      /* a voice method while the frame thread had the voice */
+    APU_RACE_IDLE_ON,   /* idle-voice trap for a voice inside VOICE_ON, or active */
+    APU_RACE_CBO,       /* the play offset written back over a title's write */
+    APU_RACE_ENV_COUNT, /* an envelope count written back over a title's */
+    APU_RACE_ENV_PHASE, /* an envelope phase written back over a title's */
+    APU_RACE_IRQ_DOWN,  /* an interrupt pending and enabled, the line down */
+    APU_RACE_IRQ_UP,    /* the line up with nothing pending */
+    APU_RACE_KINDS
+};
+extern volatile LONG apu_race[APU_RACE_KINDS];
+void apu_race_note(MCPXAPUState *d, int kind, unsigned v);
 
 /* RECOMP_APU_SSL_LOG=<voice>|all: a timed line per stream-voice event (SSL
  * programmed, a list finished, the voice dry and back) and per interrupt

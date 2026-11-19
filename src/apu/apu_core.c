@@ -1386,6 +1386,28 @@ static void apu_frame_gap_check(MCPXAPUState *d, ApuFrameGap *g, int64_t now_us)
     g->full0 = d->pace_full_asks;
 }
 
+/* The line against the status register, each pass after the frame thread's
+ * own update. A notification from the title's thread leaves them apart
+ * until the next pass. Apart for two passes with set_irq down, an update was
+ * lost: set_irq is a plain flag two threads write, and update_irq's two
+ * steps run on two threads (APU_RACE_IRQ_*). */
+static void apu_irq_line_check(MCPXAPUState *d)
+{
+    static unsigned apart;
+    uint32_t ien = qatomic_read(&d->regs[NV_PAPU_IEN]);
+    uint32_t ists = qatomic_read(&d->regs[NV_PAPU_ISTS]);
+    bool want = (ien & NV_PAPU_ISTS_GINTSTS)
+             && (ists & ~NV_PAPU_ISTS_GINTSTS & ien);
+    bool line = InterlockedCompareExchange(&s_irq_line, 0, 0) != 0;
+
+    if (want == line || d->set_irq) {
+        apart = 0;
+        return;
+    }
+    if (++apart == 2)
+        apu_race_note(d, want ? APU_RACE_IRQ_DOWN : APU_RACE_IRQ_UP, 0xFFFF);
+}
+
 static void *mcpx_apu_frame_thread(void *arg)
 {
     MCPXAPUState *d = MCPX_APU_DEVICE(arg);
@@ -1496,6 +1518,7 @@ static void *mcpx_apu_frame_thread(void *arg)
             update_irq(d);
             d->set_irq = false;
         }
+        apu_irq_line_check(d);
         apu_deliver_irq(d);
         apu_irq_stats_line();
 

@@ -16,6 +16,8 @@
  *     replayed a list it had played (RECOMP_APU_SSL_ADVANCE).
  *   - voice_fields_*: voice_set_mask was a plain read-modify-write, so the
  *     frame thread's envelope write could put back a VOICE_OFF's active bit.
+ *   - race_counters_*: not a fix. Each race between a title's method and
+ *     the frame thread that is still open must show in its counter.
  *
  * Run with: ctest --test-dir <build> */
 #include "../../src/apu/apu_vp.c"
@@ -51,6 +53,7 @@ uint8_t *mcpx_apu_phys(uint64_t addr)
 
 const char *mcpx_apu_phys_class(uint64_t addr) { (void)addr; return "fake"; }
 int apu_env_on(const char *name) { (void)name; return 0; }
+void apu_trace(const char *fmt, ...) { (void)fmt; }
 ApuIrqStats apu_irq_stats;
 
 #define CHECK(cond, ...) do { if (!(cond)) { \
@@ -376,6 +379,135 @@ static void voice_fields_survive_concurrent_writes(void)
           lo, hi, FIELD_RACE_N & 0xFFFF);
 }
 
+/* The race counters (apu_state.h). s_race_hook runs the other thread's part
+ * inside each window, so one thread shows what two do by chance. Each check
+ * also records the damage, which a fix will turn round. */
+static MCPXAPUState s_rc_d;
+static float s_rc_bins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME];
+static int s_rc_window;         /* the window to act in, once */
+
+static void rc_reset(int window)
+{
+    memset(s_ram, 0, RAM_SIZE);
+    memset(&s_rc_d, 0, sizeof(s_rc_d));
+    memset((void *)apu_race, 0, sizeof(apu_race));
+    qemu_cond_init(&s_rc_d.cond);
+    s_rc_d.regs[NV_PAPU_VPVADDR] = VOICE_BASE;
+    s_rc_d.regs[NV_PAPU_TVL2D] = 0xFFFF;
+    s_rc_d.regs[NV_PAPU_TVL3D] = 0xFFFF;
+    s_rc_d.regs[NV_PAPU_TVLMP] = 0xFFFF;
+    s_last_idle_trap = 0xFFFF;
+    s_rc_window = window;
+}
+
+static void rc_hook(MCPXAPUState *d, int window, uint16_t v)
+{
+    if (window != s_rc_window)
+        return;
+    s_rc_window = -1;
+    switch (window) {
+    case RACE_W_ON:     /* the frame thread walks the lists */
+        mcpx_apu_vp_frame(d, s_rc_bins);
+        break;
+    case RACE_W_CBO:    /* the title seeks */
+        fe_method(d, NV1BA0_PIO_SET_CURRENT_VOICE, v);
+        fe_method(d, NV1BA0_PIO_SET_VOICE_BUF_CBO, 640);
+        break;
+    case RACE_W_ENV:    /* the title releases */
+        fe_method(d, NV1BA0_PIO_VOICE_RELEASE, v);
+        break;
+    }
+}
+
+static float rc_step_amplitude(MCPXAPUState *d, uint16_t v)
+{
+    return voice_step_envelope(
+        d, v, NV_PAVS_VOICE_CFG_ENV0, NV_PAVS_VOICE_CFG_ENVA,
+        NV_PAVS_VOICE_TAR_LFO_ENV, NV_PAVS_VOICE_TAR_LFO_ENV_EA_RELEASERATE,
+        NV_PAVS_VOICE_PAR_OFFSET, NV_PAVS_VOICE_PAR_OFFSET_EALVL,
+        NV_PAVS_VOICE_CUR_ECNT_EACOUNT, NV_PAVS_VOICE_PAR_STATE_EACUR);
+}
+
+static LONG rc_total(void)
+{
+    LONG sum = 0;
+    for (int k = 0; k < APU_RACE_KINDS; k++)
+        sum += apu_race[k];
+    return sum;
+}
+
+static void race_counters_see_each_race(void)
+{
+    MCPXAPUState *d = &s_rc_d;
+    float samples[NUM_SAMPLES_PER_FRAME][2];
+    const uint32_t sustain = (uint32_t)NV_PAVS_VOICE_PAR_STATE_EFCUR_SUSTAIN << 28;
+
+    s_race_hook = rc_hook;
+
+    /* Nothing interleaved: a frame, a fetch and an envelope step count nothing. */
+    rc_reset(-1);
+    d->regs[NV_PAPU_FETFORCE1] = NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE;
+    fe_method(d, NV1BA0_PIO_SET_ANTECEDENT_VOICE,
+              (NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_2D_TOP << 16) | 0xFFFF);
+    fe_method(d, NV1BA0_PIO_VOICE_ON, 7);
+    set_voice_reg(5, NV_PAVS_VOICE_PAR_STATE,
+                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE | sustain);
+    rc_step_amplitude(d, 5);
+    mcpx_apu_vp_frame(d, s_rc_bins);
+    CHECK(rc_total() == 0, "%ld race(s) counted with nothing interleaved",
+          (long)rc_total());
+
+    /* A method for a voice the frame thread holds. */
+    rc_reset(-1);
+    d->vp.voice_spin[9] = 1;
+    fe_method(d, NV1BA0_PIO_VOICE_PAUSE, 9 | NV1BA0_PIO_VOICE_PAUSE_ACTION);
+    CHECK(apu_race[APU_RACE_BUSY] == 1 && rc_total() == 1,
+          "a method on a voice in its frame: busy %ld of %ld",
+          (long)apu_race[APU_RACE_BUSY], (long)rc_total());
+
+    /* The walk passes a voice VOICE_ON has listed and not yet made active. */
+    rc_reset(RACE_W_ON);
+    d->regs[NV_PAPU_FETFORCE1] = NV_PAPU_FETFORCE1_SE2FE_IDLE_VOICE;
+    fe_method(d, NV1BA0_PIO_SET_ANTECEDENT_VOICE,
+              (NV1BA0_PIO_SET_ANTECEDENT_VOICE_LIST_2D_TOP << 16) | 0xFFFF);
+    fe_method(d, NV1BA0_PIO_VOICE_ON, 7);
+    CHECK(apu_race[APU_RACE_IDLE_ON] == 1, "idle trap on a starting voice: %ld",
+          (long)apu_race[APU_RACE_IDLE_ON]);
+    CHECK(d->regs[NV_PAPU_FEDECPARAM] == 7
+          && voice_get_mask(d, 7, NV_PAVS_VOICE_PAR_STATE,
+                            NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE),
+          "the damage: voice 7 should be trapped as idle and active");
+
+    /* The title seeks while the frame thread fetches the voice's samples. */
+    setup_adpcm_voice(d, 1);
+    memset((void *)apu_race, 0, sizeof(apu_race));
+    s_rc_window = RACE_W_CBO;
+    voice_get_samples(d, 0, samples, NUM_SAMPLES_PER_FRAME);
+    CHECK(apu_race[APU_RACE_CBO] == 1, "a seek during the fetch: %ld",
+          (long)apu_race[APU_RACE_CBO]);
+    CHECK(voice_get_mask(d, 0, NV_PAVS_VOICE_PAR_OFFSET,
+                         NV_PAVS_VOICE_PAR_OFFSET_CBO) == NUM_SAMPLES_PER_FRAME,
+          "the damage: the seek to 640 should be lost");
+
+    /* The title releases a sustaining voice inside its envelope step. */
+    rc_reset(RACE_W_ENV);
+    set_voice_reg(5, NV_PAVS_VOICE_PAR_STATE,
+                  NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE | sustain);
+    set_voice_reg(5, NV_PAVS_VOICE_TAR_LFO_ENV, 0xFFFFFFFFu);  /* release rate */
+    rc_step_amplitude(d, 5);
+    CHECK(apu_race[APU_RACE_ENV_COUNT] == 1, "a release during the step: %ld",
+          (long)apu_race[APU_RACE_ENV_COUNT]);
+    CHECK(voice_get_mask(d, 5, NV_PAVS_VOICE_PAR_STATE,
+                         NV_PAVS_VOICE_PAR_STATE_EACUR)
+              == NV_PAVS_VOICE_PAR_STATE_EFCUR_RELEASE
+          && voice_get_mask(d, 5, NV_PAVS_VOICE_CUR_ECNT,
+                            NV_PAVS_VOICE_CUR_ECNT_EACOUNT) == 0,
+          "the damage: the release's count should be wiped");
+
+    s_race_hook = NULL;
+    memset((void *)apu_race, 0, sizeof(apu_race));
+}
+
 int main(void)
 {
     s_ram = (uint8_t *)calloc(1, RAM_SIZE);
@@ -388,6 +520,7 @@ int main(void)
     mono_hrtf_keeps_binaural_channels();
     ssl_empty_list_passes_on();
     voice_fields_survive_concurrent_writes();
+    race_counters_see_each_race();
 
     free(s_ram);
     if (s_failures) {
@@ -397,6 +530,7 @@ int main(void)
     puts("PASS: every ADPCM block count the descriptor can name decodes, "
          "VOICE_LOCK waits only for its own voice, and volume "
          "changes ramp across a frame; mono HRTF keeps both output channels; "
-         "a stream voice passes through an empty segment list; voice fields survive concurrent writes.");
+         "a stream voice passes through an empty segment list; voice fields survive concurrent writes; "
+         "the race counters see each open race.");
     return 0;
 }
