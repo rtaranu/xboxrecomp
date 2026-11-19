@@ -20,6 +20,7 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "nv2a_ack_stats.h"
 #include "platform/host_time.h"   /* xbox_HostSleepNs */
 #include <stdio.h>
 #include <stdlib.h>
@@ -970,9 +971,10 @@ static void poke_init(void)
                         " not a fix\n", g_poke_count);
 }
 
-static void poke_tick(void)
+/* Each mirror tick returns how many words it changed. */
+static int poke_tick(void)
 {
-    int i;
+    int i, n = 0;
 
     for (i = 0; i < g_poke_count; i++) {
         if (!fence_readable(g_poke[i].va, 4))
@@ -980,15 +982,18 @@ static void poke_tick(void)
         {
             volatile uint32_t *w = (volatile uint32_t *)
                 ((uintptr_t)g_poke[i].va + g_memory_offset);
-            if (*w != g_poke[i].value)
+            if (*w != g_poke[i].value) {
                 *w = g_poke[i].value;
+                n++;
+            }
         }
     }
+    return n;
 }
 
-static void dsp_ack_tick(void)
+static int dsp_ack_tick(void)
 {
-    int i;
+    int i, n = 0;
 
     for (i = 0; i < g_dsp_ack_count; i++) {
         /* fence_readable rather than a bare bounds test: these land in the
@@ -999,10 +1004,13 @@ static void dsp_ack_tick(void)
         {
             volatile uint32_t *w = (volatile uint32_t *)
                 ((uintptr_t)g_dsp_ack[i] + g_memory_offset);
-            if (*w)
+            if (*w) {
                 *w = 0;
+                n++;
+            }
         }
     }
+    return n;
 }
 
 static const uint32_t MCPX_COUNTERS[] = {
@@ -1117,8 +1125,10 @@ int xbox_Nv2aMirrorCounter(uint32_t device_ptr_va,
     return 0;
 }
 
-static void counter_mirrors_tick(void)
+static int counter_mirrors_tick(void)
 {
+    int n = 0;
+
     for (int i = 0; i < g_counter_mirror_count; i++) {
         uint32_t dev;
 
@@ -1136,10 +1146,13 @@ static void counter_mirrors_tick(void)
             uint32_t src =
                 *(volatile uint32_t *)((uintptr_t)(dev + g_counter_mirrors[i].src_off)
                                        + g_memory_offset);
-            if (*dst != src)
+            if (*dst != src) {
                 *dst = src;
+                n++;
+            }
         }
     }
+    return n;
 }
 
 /*
@@ -1268,6 +1281,7 @@ static void frame_counters_tick(void)
     }
     g_frame_counter_last_ms = now;
 
+    ACK_COUNT(frame_tick);
     for (i = 0; i < g_frame_counter_count; i++)
         frame_counter_bump(i);
 }
@@ -1297,8 +1311,10 @@ uint32_t xbox_Nv2aFenceWordVa(void)
     return 0;
 }
 
-static void fence_mirrors_tick(void)
+static int fence_mirrors_tick(void)
 {
+    int n = 0;
+
     for (int i = 0; i < g_fence_mirror_count; i++) {
         uint32_t dev, get_ptr;
 
@@ -1319,10 +1335,13 @@ static void fence_mirrors_tick(void)
             uint32_t put =
                 *(volatile uint32_t *)((uintptr_t)(dev + g_fence_mirrors[i].put_off)
                                        + g_memory_offset);
-            if (*fence != put)
+            if (*fence != put) {
                 *fence = put;
+                n++;
+            }
         }
     }
+    return n;
 }
 
 static int s_nv2a_trace = 0;
@@ -1410,6 +1429,8 @@ static volatile LONG g_pgraph_trap_on = -1;   /* -1 until the first raise */
  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
  * from inside the walk answers the kickoff within a few hundred commands,
  * without a thread of its own spinning on a host core. */
+extern volatile LONG g_nv2a_kick_waiting;
+
 /* RECOMP_ACK_CLOCK_EACH=1: ask xbox_VblankAckHeld for every register, as
  * before (an A/B switch; the clock read was a quarter of the thread). */
 static int ack_clock_each(void)
@@ -1423,7 +1444,7 @@ static int ack_clock_each(void)
     return (int)on;
 }
 
-static void nv2a_ack_busy_bits(int flip_held)
+static void nv2a_ack_busy_bits(int flip_held, int from_walk)
 {
     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
     int vbl_held = -1;   /* asked once, and only with a vblank bit up */
@@ -1468,14 +1489,20 @@ static void nv2a_ack_busy_bits(int flip_held)
         }
         /* Interlocked: the vblank-ack thread and the guest change other
          * bits of the same word meanwhile. */
-        if (*r & mask)
-            InterlockedAnd((volatile LONG *)r, (LONG)~mask);
+        if (*r & mask) {
+            uint64_t kick_ns = g_ack_stats_on && i == 0 && g_nv2a_kick_waiting
+                             ? g_ack_kick_ns : 0;
+            uint32_t was = (uint32_t)InterlockedAnd((volatile LONG *)r, (LONG)~mask);
+            if (g_ack_stats_on && (was & mask))
+                nv2a_ack_stats_cleared(i, NV2A_ACK[i].offset, was & mask,
+                                       from_walk, kick_ns);
+        }
     }
 }
 
 void xbox_Nv2aAckBusyBits(void)
 {
-    nv2a_ack_busy_bits(0);
+    nv2a_ack_busy_bits(0, 1);
 }
 
 /* One word of the NV2A register file (offset from the register base), or NULL
@@ -1665,7 +1692,7 @@ int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms)
             return 1;
         /* This is the walker's thread, which answers D3D's kickoffs
          * between commands; a title kicking off meanwhile waits on it. */
-        nv2a_ack_busy_bits(0);
+        nv2a_ack_busy_bits(0, 1);
         xbox_Nv2aRaiseGpuIrq();
         if (WaitForSingleObject(g_pgraph_acked, 2) == WAIT_OBJECT_0)
             return 1;
@@ -1756,16 +1783,20 @@ static uint64_t kick_spin_ns(void)
 
 /* 1 once the announced flush is answered, or must not be: a held flip
  * leaves it set, as the pass does, so pacing still stalls the title. */
-static int kick_ack_try(void)
+static int kick_ack_try(int from_walk)
 {
     volatile uint32_t *r;
+    uint64_t kick_ns;
 
     if (!g_nv2a_memory || nv2a_pb_exec_flip_held())
         return 1;
     r = (volatile uint32_t *)((char *)g_nv2a_memory + NV2A_ACK_PFB_FLUSH);
     if (!(*r & NV2A_ACK[0].busy_mask))
         return 0;
+    kick_ns = g_ack_stats_on ? g_ack_kick_ns : 0;
     InterlockedAnd((volatile LONG *)r, (LONG)~NV2A_ACK[0].busy_mask);
+    if (g_ack_stats_on)
+        nv2a_ack_stats_flush(from_walk, kick_ns);
     return 1;
 }
 
@@ -1773,8 +1804,12 @@ static int kick_ack_try(void)
  * announced. */
 void xbox_Nv2aKickAck(void)
 {
-    if (kick_ack_try())
+    uint64_t kick_ns = g_ack_kick_ns;
+
+    if (kick_ack_try(1)) {
         InterlockedExchange(&g_nv2a_kick_waiting, 0);
+        nv2a_ack_stats_kick_end(kick_ns);   /* also when a held flip left the flush set */
+    }
 }
 
 extern int nv2a_pb_exec_flip_due(uint32_t *due);
@@ -1805,6 +1840,8 @@ void nv2a_pb_flip_hold_wait(void)
                && xbox_HostNowNs() - start < XBOX_FLIP_HOLD_MAX_NS)
             xbox_HostSleepNs(step);
     }
+    if (g_ack_stats_on)
+        nv2a_ack_stats_kick_announced(kick_spin_ns() != 0);
     if (kick_spin_ns())
         InterlockedExchange(&g_nv2a_kick_waiting, 1);
 }
@@ -1812,26 +1849,36 @@ void nv2a_pb_flip_hold_wait(void)
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
-    /* Since when this thread has spun on the announced kickoff. */
-    uint64_t kick_from = 0;
+    /* The announced kickoff this thread is spinning on: since when, and its
+     * stats stamp. */
+    uint64_t kick_from = 0, kick_stamp = 0;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
+        int mirrored, put_moved = 0;
+
         /* An announced kickoff: the loop spins on its flush bit, skipping
          * the pass, until the flush is answered (or a held flip says it must
          * not be) or RECOMP_KICK_SPIN_US passes. */
         if (g_nv2a_kick_waiting) {
             uint64_t now = xbox_HostNowNs();
 
-            if (!kick_from)
+            if (!kick_from) {
                 kick_from = now;
-            if (!kick_ack_try() && now - kick_from < kick_spin_ns()) {
-                YieldProcessor();
-                continue;
+                kick_stamp = g_ack_kick_ns;
             }
-            /* answered, held or given up */
+            if (!kick_ack_try(0)) {
+                if (now - kick_from < kick_spin_ns()) {
+                    YieldProcessor();
+                    continue;
+                }
+                ACK_COUNT(kick_spin_timeout);
+            }
             InterlockedExchange(&g_nv2a_kick_waiting, 0);
+            nv2a_ack_stats_kick_end(kick_stamp);   /* answered, held or given up */
             kick_from = 0;
         }
 
+        if (g_ack_stats_on)
+            nv2a_ack_stats_pass(regs);
         /* A flip held for its vblank (nv2a_flip_hold.h): this pass walks
          * nothing, leaves DMA_GET where it is and acknowledges no PFB flush,
          * which is how the title feels the console's FLIP_STALL. Nothing is
@@ -1845,12 +1892,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          * flips paces only the last. */
         extern int nv2a_pb_exec_flip_poll(void);
         int flip_held = nv2a_pb_exec_flip_poll();
-        nv2a_ack_busy_bits(flip_held);
+        nv2a_ack_busy_bits(flip_held, 0);
         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
             volatile uint32_t *r =
                 (volatile uint32_t *)((char *)regs + NV2A_IDLE[i].offset);
             if ((*r & NV2A_IDLE[i].idle_mask) != NV2A_IDLE[i].idle_mask) {
                 *r |= NV2A_IDLE[i].idle_mask;
+                ACK_COUNT(idle[i]);
             }
         }
         /* DMA_GET used to be set to DMA_PUT here, at the top of the tick,
@@ -1866,10 +1914,17 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          *
          * The advance now happens after the scan, further down, which is
          * also the only ordering that gives the title real back-pressure. */
-        fence_mirrors_tick();
-        dsp_ack_tick();
-        poke_tick();
-        counter_mirrors_tick();
+        {
+            /* Each returns the words it changed (RECOMP_ACK_STATS). */
+            int fence = fence_mirrors_tick();
+            int dsp = dsp_ack_tick();
+            int poke = poke_tick();
+            int counter = counter_mirrors_tick();
+
+            mirrored = fence + dsp + poke + counter;
+            if (g_ack_stats_on)
+                nv2a_ack_stats_mirrors(fence, dsp, poke, counter);
+        }
         frame_counters_tick();
         framebuffer_probe_tick();
 
@@ -1896,6 +1951,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             if (!flip_held
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
+                uint64_t walk_ns;
+
+                put_moved = put != last_put;
+                walk_ns = put_moved ? nv2a_ack_stats_walk_begin() : 0;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern void nv2a_pb_scan(uint32_t);
@@ -1981,6 +2040,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     *get = put;
                     get_written = put;
                 }
+                nv2a_ack_stats_walk_end(walk_ns);
                 last_put = put; last_put_ms = now_ms;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET
@@ -2010,6 +2070,9 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 fflush(stderr);
             }
         }
+
+        if (mirrored && !put_moved && g_ack_stats_on)
+            g_ack_stats.mirror_noput += (uint64_t)mirrored;
 
         if (g_mcpx_regs && !g_apu_mmio_trapped) {
             for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
@@ -2041,12 +2104,14 @@ static void xbox_Nv2aAckStart(void)
 {
     dsp_ack_init();
     poke_init();
+    nv2a_ack_stats_init();
     g_nv2a_ack_stop = 0;
     g_nv2a_ack_thread = CreateThread(NULL, 0, nv2a_ack_thread,
                                      g_nv2a_memory, 0, NULL);
     if (g_nv2a_ack_thread) {
         fprintf(stderr, "  NV2A busy-bit ack: %zu register(s) acknowledged\n",
                 sizeof(NV2A_ACK) / sizeof(NV2A_ACK[0]));
+        nv2a_ack_stats_writes_init(g_nv2a_memory, GetThreadId(g_nv2a_ack_thread));
     }
 }
 

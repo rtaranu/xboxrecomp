@@ -3106,6 +3106,13 @@ int xbox_VblankAckHeld(void)
            <= VBL_ACK_LATE_MS;
 }
 
+/* 1 once the vblank-ack thread owns the vblank bits (RECOMP_ACK_STATS: a
+ * clear by nv2a-ack is then the backstop). */
+int xbox_VblankAckOwned(void)
+{
+    return g_vbl_ack_owned != 0;
+}
+
 void xbox_VblankArmBits(volatile uint32_t *pcrtc_intr, volatile LONG *tick_busy,
                         int raised)
 {
