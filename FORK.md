@@ -88,6 +88,7 @@ yet; "fork-only" stays here. Not listed: the commits adding this file and
 | 68a3a89 | docs: the NV2A ack thread, and a design to stop it polling | not sent (goes with the ack thread work) |
 | 6a0aaa7 | docs: NV2A ack thread design, gaps a review found | not sent (with the above) |
 | d01b97a | docs: NV2A ack thread, what to measure before building | not sent (with the above) |
+| 283412b | apu: only a trap writes FEDECMETH/FEDECPARAM | not sent (a crash fix; candidate on its own) |
 
 ## Work in flight
 
