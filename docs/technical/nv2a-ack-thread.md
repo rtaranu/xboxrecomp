@@ -417,6 +417,31 @@ A second review, of the design against the loop (2026-11-18):
   faster (2.5 to 3.3 million a second at Halo's menu), and the MCPX counter
   with them. Baselines are taken after phase 1.
 
+### With memory model 2
+
+This branch merged with `mem2` (2026-11-19, a local test merge, not kept)
+and run on Halo, 20 s headless per mode, then played:
+
+| `RECOMP_MEM_MODEL` | `RECOMP_ACK_SLEEP` | Per 5 s |
+|---|---|---|
+| 1 | 0 | 16.5 million passes, 312 work, 150 flips |
+| 1 | 1 | 53,000 passes, 3,440 sleeps, 155 woken by a kickoff |
+| 2 | 0 | as 1/0 |
+| 2 | 1 | as 1/1 |
+
+`[MEM]` peaks and flips were the same in all four, and `RECOMP_ACK_WRITES`
+still counted the title's PFB and PUT writes under model 2. The two meet
+only in `fence_readable`, which model 2 extends to the arena, and Halo
+never exercises it: its fence word sits in the contiguous window, its
+device in the image, and with the software GPU on it registers no fence
+mirror (`mirrors fence 0` in every mode). Without the software GPU Halo
+submits no work in either model. A title whose device lands in the arena
+would test that path.
+
+A live session crashed once in DirectSound's interrupt handler; the cause
+was the APU's decode registers, fixed on `integration` (4ac621e), not
+either branch. With that fix Halo played without trouble.
+
 ### Still to measure
 
 What each item decides, in order:
