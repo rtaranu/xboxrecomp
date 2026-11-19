@@ -116,3 +116,4 @@ lands.
 | af8325c | docs: memory model 2, the window fills from the top | |
 | b6efa52 | kernel: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE when filling from the top | |
 | a179211 | docs: memory model 2 ignores RECOMP_CONTIG_AVOID_IMAGE, play sessions | |
+| 91a1fee | docs: memory model 2, the first branch is gone | |
