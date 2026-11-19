@@ -1557,7 +1557,15 @@ static void *mcpx_apu_frame_thread(void *arg)
             uint32_t sectl = qatomic_read(&d->regs[NV_PAPU_SECTL]);
             uint32_t ssl = qatomic_read(&d->regs[NV_PAPU_SSL]);
             d->sample_count += NUM_SAMPLES_PER_FRAME;
-            if (ssl
+            /* RECOMP_APU_SSL_TICK=0: no tick. An early DirectSound (Halo,
+             * XDK 3911) answers this interrupt by setting the whole APU up
+             * again with a 10 ms stall, 23 times a second. */
+            static int tick = -1;
+            if (tick < 0) {
+                const char *e = getenv("RECOMP_APU_SSL_TICK");
+                tick = !(e && *e == '0');
+            }
+            if (ssl && tick
                     && d->sample_count >= ssl
                     && (sectl & NV_PAPU_SECTL_XCNTMODE)
                            != NV_PAPU_SECTL_XCNTMODE_OFF) {
