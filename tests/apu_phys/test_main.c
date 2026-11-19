@@ -15,9 +15,9 @@
  * pages constantly); freeing
  * the heap block gives the page back to the window, except a page the freed
  * block shares with a live neighbour, which goes back once that neighbour is
- * freed too. Only heap pages are recorded: an image or stack page is never
- * freed, so its record would never clear (and a voice array at a window
- * number inside a large image must stay the window). */
+ * freed too. An image page is recorded only when the title asks about it (a
+ * voice array at a window number inside a large image must stay the window);
+ * a stack page never. */
 #include "kernel.h"
 #include "xbox_memory_layout.h"
 #include "apu_shim.h"
@@ -123,11 +123,19 @@ int main(int argc, char **argv)
     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_CONTIG_BASE + a));
     check(side(a + 0x10) == 0, "a window name of the same number keeps RAM");
 
-    /* Not heap: the image and the main stack are never recorded. */
+    /* An image page the title asks about is RAM (DirectSound's silence
+     * buffers are image data, and a title can place a window block on the
+     * same number); the image's other pages are not, and no stack page is. */
+    check(!xbox_PhysRamNameMap()[g_xbox_image_lo >> 12],
+          "an image page nobody named is not recorded");
     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)g_xbox_image_lo);
     xbox_MmGetPhysicalAddress((PVOID)(uintptr_t)(XBOX_STACK_BASE + 0x100));
-    check(!xbox_PhysRamNameMap()[g_xbox_image_lo >> 12],
-          "an image page is not recorded");
+    check(xbox_PhysRamNameMap()[g_xbox_image_lo >> 12]
+          && xbox_PhysRamNamedAt(g_xbox_image_lo + 0x10),
+          "an image page the title named is RAM");
+    check(g_xbox_image_hi - g_xbox_image_lo <= 0x1000
+          || !xbox_PhysRamNameMap()[(g_xbox_image_lo >> 12) + 1],
+          "the image page after it is not recorded");
     check(!xbox_PhysRamNameMap()[(XBOX_STACK_BASE + 0x100) >> 12],
           "a stack page is not recorded");
 

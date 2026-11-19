@@ -4796,11 +4796,12 @@ uint32_t xbox_ContiguousInUseBytes(void)
  * whatever the window held there as PCM.
  *
  * MmGetPhysicalAddress is the one moment the runtime sees which copy the title
- * means, so it records RAM names here. Heap pages only: the image, its BSS and
- * the stacks are never freed, so a record there would never clear, and a
- * title's DirectSound voice array can sit at a window address whose number
- * falls inside a large image (see mcpx_apu_phys). The record is kept until the
- * heap frees the page. A window name does not clear it, because D3D names its
+ * means, so it records RAM names here: heap pages, and image pages (see
+ * xbox_PhysNoteRamName). Not the whole image: a title's DirectSound voice
+ * array can sit at a window address whose number falls inside a large image
+ * (see mcpx_apu_phys), so only a page the title asked about is RAM. A heap
+ * page's record is kept until the heap frees the page; an image page's for
+ * good. A window name does not clear it, because D3D names its
  * window pages all the time and the effect buffer in RAM is still live. If one
  * page holds live sound data in both copies, the APU picks RAM; this record
  * cannot tell them apart.
@@ -4849,6 +4850,16 @@ void xbox_PhysNoteRamName(uint32_t va)
         if (i >= 0 && !g_heap_blocks[i].free)
             g_heap_blocks[i].named = 1;
         ReleaseSRWLockShared(&g_heap_lock);
+    } else if (va >= g_xbox_image_lo && va < g_xbox_image_hi
+               && va < XBOX_CONTIG_SIZE) {
+        /* An image page the title named. A title that places its own
+         * window blocks by address can put one on the same number (Halo's
+         * game state and tag cache cover most of its image's range), and
+         * the contiguous map then sent DirectSound's silence buffers, which
+         * are image data, to the window: its two always-on silence voices
+         * looped 16 and 32 samples of level data, a loud steady tone from
+         * the first level load. Never cleared: the image is never freed. */
+        g_phys_ram_named[va / CONTIG_PAGE] = 1;
     }
 }
 
