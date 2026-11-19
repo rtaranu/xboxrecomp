@@ -1410,9 +1410,23 @@ static volatile LONG g_pgraph_trap_on = -1;   /* -1 until the first raise */
  * and a level load, thousands of kickoffs long, looked frozen. Clearing them
  * from inside the walk answers the kickoff within a few hundred commands,
  * without a thread of its own spinning on a host core. */
+/* RECOMP_ACK_CLOCK_EACH=1: ask xbox_VblankAckHeld for every register, as
+ * before (an A/B switch; the clock read was a quarter of the thread). */
+static int ack_clock_each(void)
+{
+    static volatile long on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("RECOMP_ACK_CLOCK_EACH");
+        on = e && *e == '1';
+    }
+    return (int)on;
+}
+
 static void nv2a_ack_busy_bits(int flip_held)
 {
     volatile uint32_t *regs = (volatile uint32_t *)g_nv2a_memory;
+    int vbl_held = -1;   /* asked once, and only with a vblank bit up */
 
     if (!regs)
         return;
@@ -1420,6 +1434,10 @@ static void nv2a_ack_busy_bits(int flip_held)
         volatile uint32_t *r =
             (volatile uint32_t *)((char *)regs + NV2A_ACK[i].offset);
         uint32_t mask = NV2A_ACK[i].busy_mask;
+        uint32_t vbl_bit =
+            NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0   ? NV2A_ACK_PMC_INTR_PCRTC
+          : NV2A_ACK[i].offset == NV2A_ACK_PCRTC_INTR_0 ? NV2A_ACK_PCRTC_INTR_VBLANK
+          : 0;
         if (flip_held && NV2A_ACK[i].offset == NV2A_ACK_PFB_FLUSH)
             continue;
         /* Once the vblank is delivered its two bits belong to the
@@ -1427,12 +1445,17 @@ static void nv2a_ack_busy_bits(int flip_held)
          * DPC's ack. Cleared here too, a pass that landed between the
          * vblank and the DPC's read of PMC_INTR_0 took the vblank away
          * from the DPC: no ack, no count, and the title's present at
-         * vblank slipped a frame. */
-        if (xbox_VblankAckHeld()) {
-            if (NV2A_ACK[i].offset == NV2A_ACK_PMC_INTR_0)
-                mask &= ~NV2A_ACK_PMC_INTR_PCRTC;
-            else if (NV2A_ACK[i].offset == NV2A_ACK_PCRTC_INTR_0)
-                mask &= ~NV2A_ACK_PCRTC_INTR_VBLANK;
+         * vblank slipped a frame.
+         *
+         * Not asked (the bit was down when read) counts as held: a bit
+         * that rises meanwhile waits for the next pass. */
+        if (ack_clock_each())
+            vbl_held = xbox_VblankAckHeld();
+        if (vbl_bit) {
+            if ((*r & vbl_bit) && vbl_held < 0)
+                vbl_held = xbox_VblankAckHeld();
+            if (vbl_held != 0)
+                mask &= ~vbl_bit;
         }
         /* With software-method traps on, PGRAPH_INTR is write-1-to-clear
          * and only a trap sets it: its bits are the title's to acknowledge.
