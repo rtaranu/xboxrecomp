@@ -20,6 +20,7 @@
 #include "guest_vmem.h"
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
+#include "nv2a_ack_sleep.h"
 #include "nv2a_ack_stats.h"
 #include "platform/host_time.h"   /* xbox_HostSleepNs */
 #include <stdio.h>
@@ -1842,18 +1843,22 @@ void nv2a_pb_flip_hold_wait(void)
     }
     if (g_ack_stats_on)
         nv2a_ack_stats_kick_announced(kick_spin_ns() != 0);
-    if (kick_spin_ns())
+    if (kick_spin_ns()) {
         InterlockedExchange(&g_nv2a_kick_waiting, 1);
+        nv2a_ack_sleep_kick();
+    }
 }
 
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
     volatile uint32_t *regs = (volatile uint32_t *)param;
+    /* What a pass found, for RECOMP_ACK_SLEEP (nv2a_ack_sleep.h). */
+    nv2a_ack_pass pass = { 0 };
     /* The announced kickoff this thread is spinning on: since when, and its
      * stats stamp. */
     uint64_t kick_from = 0, kick_stamp = 0;
     while (!InterlockedCompareExchange(&g_nv2a_ack_stop, 0, 0)) {
-        int mirrored, put_moved = 0;
+        pass.kicked = pass.put_moved = pass.mirrored = 0;
 
         /* An announced kickoff: the loop spins on its flush bit, skipping
          * the pass, until the flush is answered (or a held flip says it must
@@ -1867,6 +1872,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             }
             if (!kick_ack_try(0)) {
                 if (now - kick_from < kick_spin_ns()) {
+                    ACK_ADD(up_kick_spin);
                     YieldProcessor();
                     continue;
                 }
@@ -1875,6 +1881,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             InterlockedExchange(&g_nv2a_kick_waiting, 0);
             nv2a_ack_stats_kick_end(kick_stamp);   /* answered, held or given up */
             kick_from = 0;
+            pass.kicked = 1;
         }
 
         if (g_ack_stats_on)
@@ -1892,6 +1899,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          * flips paces only the last. */
         extern int nv2a_pb_exec_flip_poll(void);
         int flip_held = nv2a_pb_exec_flip_poll();
+        pass.flip_held = flip_held;
         nv2a_ack_busy_bits(flip_held, 0);
         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
             volatile uint32_t *r =
@@ -1915,13 +1923,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          * The advance now happens after the scan, further down, which is
          * also the only ordering that gives the title real back-pressure. */
         {
-            /* Each returns the words it changed (RECOMP_ACK_STATS). */
+            /* Each returns the words it changed: work for RECOMP_ACK_SLEEP. */
             int fence = fence_mirrors_tick();
             int dsp = dsp_ack_tick();
             int poke = poke_tick();
             int counter = counter_mirrors_tick();
 
-            mirrored = fence + dsp + poke + counter;
+            pass.mirrored = fence + dsp + poke + counter;
             if (g_ack_stats_on)
                 nv2a_ack_stats_mirrors(fence, dsp, poke, counter);
         }
@@ -1953,8 +1961,8 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
                 uint64_t walk_ns;
 
-                put_moved = put != last_put;
-                walk_ns = put_moved ? nv2a_ack_stats_walk_begin() : 0;
+                pass.put_moved = put != last_put;
+                walk_ns = pass.put_moved ? nv2a_ack_stats_walk_begin() : 0;
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern void nv2a_pb_scan(uint32_t);
@@ -2042,6 +2050,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                 }
                 nv2a_ack_stats_walk_end(walk_ns);
                 last_put = put; last_put_ms = now_ms;
+                pass.seen_put = put;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET
                  * tells those apart -- D3D waits for GET to reach PUT before it
@@ -2071,14 +2080,16 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             }
         }
 
-        if (mirrored && !put_moved && g_ack_stats_on)
-            g_ack_stats.mirror_noput += (uint64_t)mirrored;
+        if (pass.mirrored && !pass.put_moved && g_ack_stats_on)
+            g_ack_stats.mirror_noput += (uint64_t)pass.mirrored;
 
         if (g_mcpx_regs && !g_apu_mmio_trapped) {
-            for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
+            uint32_t step = nv2a_ack_mcpx_step();
+
+            for (size_t i = 0; step && i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
                 volatile uint32_t *c =
                     (volatile uint32_t *)((char *)g_mcpx_regs + MCPX_COUNTERS[i]);
-                *c += 1;
+                *c += step;
             }
         }
 
@@ -2091,6 +2102,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
+        /* RECOMP_ACK_SLEEP spins, waits or sleeps (nv2a_ack_sleep.c). */
+        pass.hold_sleep_ns = ack_hold_sleep_ns();
+        if (nv2a_ack_sleep_pass_end(&pass))
+            continue;
         /* Asked again: a hold this pass began may have ended meanwhile. */
         if (flip_held && ack_hold_sleep_ns() && nv2a_pb_exec_flip_poll())
             xbox_HostSleepNs(ack_hold_sleep_ns());
@@ -2105,6 +2120,9 @@ static void xbox_Nv2aAckStart(void)
     dsp_ack_init();
     poke_init();
     nv2a_ack_stats_init();
+    nv2a_ack_sleep_init(g_nv2a_memory ? (volatile uint32_t *)((char *)g_nv2a_memory
+                                                          + NV2A_USER_DMA_PUT) : NULL,
+                        kick_spin_ns() != 0);
     g_nv2a_ack_stop = 0;
     g_nv2a_ack_thread = CreateThread(NULL, 0, nv2a_ack_thread,
                                      g_nv2a_memory, 0, NULL);

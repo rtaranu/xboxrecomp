@@ -1287,6 +1287,9 @@ void xbox_log(int level, const char* subsystem, const char* fmt, ...);
  * one field per vblank, so its low bit is the field parity that the field pin
  * (port 0x80C0) reports. */
 uint32_t xbox_VblankCount(void);
+/* After each vblank is counted (nv2a_ack_sleep.c): wakes the sleeping
+ * ack thread while a flip is held, so the release waits for no timeout. */
+void xbox_Nv2aAckVblank(void);
 
 /* cpuid for lifted code (kernel_hal.c): the Xbox's Pentium III. Also declared
  * in templates/runtime/recomp_types.h for generated code. */

@@ -3222,6 +3222,7 @@ static void kernel_vblank_count(long long now)
     LARGE_INTEGER q;
 
     InterlockedIncrement(&g_vblank_total);
+    xbox_Nv2aAckVblank();
     if (!qf.QuadPart)
         QueryPerformanceFrequency(&qf);
     QueryPerformanceCounter(&q);
@@ -3493,6 +3494,7 @@ static void kernel_vblank_tick(void)
         fflush(stderr);
         last_ms = now;
     }
+    xbox_Nv2aAckVblank();   /* after the count: may release a held flip */
 
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
         return;

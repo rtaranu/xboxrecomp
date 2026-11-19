@@ -41,6 +41,16 @@ typedef struct {
     uint64_t fence, dsp, poke, counter, mirror_noput;
     uint64_t frame_tick;                 /* frame counters' time fallback */
     uint64_t vbl_backstop;               /* xbox_VblankAckHeld gave the bits back */
+    /* RECOMP_ACK_SLEEP: sleeps, how each ended (an announced kickoff, or
+     * the safety net's timeout), and timeouts whose pass found work. */
+    uint64_t sleeps, wake_kick, wake_net, net_work;
+    /* Sleeps while a flip is held, and those a vblank (or a kickoff) ended. */
+    uint64_t hold_sleeps, hold_woken;
+    /* Passes that did not end in a sleep, by why: spinning on an announced
+     * kickoff's flush (not counted in passes), a kickoff announced at the
+     * pass's end, RECOMP_ACK_SPIN_US since the last work, the wait for the
+     * PUT after a flush, and a sleep that work called off at once. */
+    uint64_t up_kick_spin, up_kick_wait, up_spin, up_put_wait, up_refused;
     /* Powers of two in microseconds: bucket 0 is < 1 us, bucket i < 2^i us. */
     uint64_t h_pass[ACK_HIST_BUCKETS];   /* start of a pass to the next */
     uint64_t h_kick[ACK_HIST_BUCKETS];   /* kickoff announced to flush cleared */
@@ -86,8 +96,10 @@ void nv2a_ack_stats_kick_end(uint64_t t);
  * (the register file), ack_tid being the ack thread. */
 void nv2a_ack_stats_writes_init(void *nv2a_memory, unsigned long ack_tid);
 
-/* A count that is work for the pass. */
+/* A count that is work for the pass, and one that is not. */
 #define ACK_COUNT(field) \
     do { if (g_ack_stats_on) { g_ack_stats.field++; g_ack_pass_work = 1; } } while (0)
+#define ACK_ADD(field) \
+    do { if (g_ack_stats_on) g_ack_stats.field++; } while (0)
 
 #endif /* NV2A_ACK_STATS_H */

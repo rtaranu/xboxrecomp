@@ -305,6 +305,18 @@ static void report(double t, const nv2a_ack_stats *cur, const nv2a_ack_stats *pr
             " counter %llu (no PUT %llu)  frame-tick %llu\n",
             D(idle[0]), D(idle[1]), D(fence), D(dsp), D(poke), D(counter),
             D(mirror_noput), D(frame_tick));
+    if (s.sleeps)
+        fprintf(s_out, "  sleeps %llu woken by kickoff %llu timeout %llu"
+                " (found work %llu)\n",
+                D(sleeps), D(wake_kick), D(wake_net), D(net_work));
+    if (s.hold_sleeps)
+        fprintf(s_out, "  held-flip sleeps %llu woken %llu\n",
+                D(hold_sleeps), D(hold_woken));
+    if (s.sleeps || s.hold_sleeps)
+        fprintf(s_out, "  awake: kick spin %llu, kick waiting %llu, spin %llu,"
+                " PUT wait %llu, sleep refused %llu\n",
+                D(up_kick_spin), D(up_kick_wait), D(up_spin), D(up_put_wait),
+                D(up_refused));
     put_hist("pass", s.h_pass, p.h_pass);
     put_hist("kick", s.h_kick, p.h_kick);
     put_hist("walk", s.h_walk, p.h_walk);
