@@ -97,8 +97,8 @@ lands.
 
 | Branch | Base | Where | What |
 |---|---|---|---|
-| `nv2a-ack-thread` | d01b97a | local, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
-| `mem2` | d5098a4 | local, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
+| `nv2a-ack-thread` | d01b97a | fork, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
+| `mem2` | d5098a4 | fork, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
 
 `mem2`, oldest first:
 
