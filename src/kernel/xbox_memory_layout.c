@@ -1765,6 +1765,24 @@ static void kick_ack_spin(void)
     }
 }
 
+extern int nv2a_pb_exec_flip_due(uint32_t *due);
+
+int nv2a_pb_flip_present_wait(void)
+{
+    uint32_t due;
+    uint64_t start;
+
+    if (!nv2a_pb_exec_flip_due(&due) || (int32_t)(xbox_VblankCount() - due) >= 0)
+        return 0;
+    /* 100 us steps on the high-resolution timer: the present lands within
+     * a fraction of a millisecond of the vblank. */
+    start = xbox_HostNowNs();
+    while ((int32_t)(xbox_VblankCount() - due) < 0
+           && xbox_HostNowNs() - start < XBOX_FLIP_HOLD_MAX_NS)
+        xbox_HostSleepNs(100000u);
+    return 1;
+}
+
 void nv2a_pb_flip_hold_wait(void)
 {
     uint64_t step = kick_hold_wait_ns(), start;
