@@ -105,6 +105,7 @@ lands.
 |---|---|---|---|
 | `nv2a-ack-thread` | d01b97a | fork, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
 | `mem2` | d5098a4 | fork, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
+| `flip-due` | `nv2a-ack-thread` (9aa8eef) | local, worktree `xboxrecomp-bo3` (Third Degree Burns' pin) | 621f8e5: a backend presenting in the title's Swap waits for the vblank the frame is due on (`nv2a_pb_flip_present_wait`); its own commit, upstream candidate once the toolkit's own present uses it |
 
 `mem2`, oldest first:
 
