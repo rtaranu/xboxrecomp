@@ -94,6 +94,7 @@ yet; "fork-only" stays here. Not listed: the commits adding this file and
 | f85971b | apu: count the sequencer holds that run out (RECOMP_APU_SEQ_HOLD_US) | not sent (candidate: a hole in the sound that nothing reported) |
 | e641c9e | apu: RECOMP_APU_SSL_TICK=0, no sample-limit interrupt | not sent (what the hardware raises the bit for is unchecked) |
 | d0d502b | kernel: an image page the title asks the physical address of is RAM | not sent (candidate; mem2 may make it moot) |
+| 4f22d57 | nv2a: present a paced frame on the vblank it is due on | not sent (needs 5ccccd1; candidate once the toolkit's own present uses it) |
 
 ## Work in flight
 
@@ -105,7 +106,7 @@ lands.
 |---|---|---|---|
 | `nv2a-ack-thread` | d01b97a | fork, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
 | `mem2` | d5098a4 | fork, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
-| `flip-due` | `nv2a-ack-thread` (9aa8eef) | local, worktree `xboxrecomp-bo3` (Third Degree Burns' pin) | 621f8e5: a backend presenting in the title's Swap waits for the vblank the frame is due on (`nv2a_pb_flip_present_wait`); its own commit, upstream candidate once the toolkit's own present uses it |
+| `flip-due` | `nv2a-ack-thread` (9aa8eef) | local, worktree `xboxrecomp-bo3` (Third Degree Burns' pin) | 621f8e5, the same change as 4f22d57 above, on the ack thread; goes when Third Degree Burns pins `splintercell` or the ack thread lands |
 
 `mem2`, oldest first:
 
