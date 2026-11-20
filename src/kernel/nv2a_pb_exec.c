@@ -4600,6 +4600,16 @@ int nv2a_pb_exec_flip_held(void)
     return ((volatile XboxFlipHold *)&s_flip_hold)->held != 0;
 }
 
+/* The vblank the title's next flip is due on (xbox_FlipHoldDue), from any
+ * thread; 0 with flip pacing off. Read while the ack loop may release a
+ * hold, which leaves the answer unchanged. */
+int nv2a_pb_exec_flip_due(uint32_t *due)
+{
+    if (!nv2a_pb_exec_flip_pacing())
+        return 0;
+    return xbox_FlipHoldDue((const XboxFlipHold *)&s_flip_hold, due);
+}
+
 /* The hold's line in the periodic [GPU] report, then reset. */
 static void flip_hold_report(void)
 {
