@@ -10,7 +10,8 @@
  * the 100 ms bound with and without vblanks, ONE_OR_IMMEDIATE under edge,
  * two stalls in one walk, last_flip after a timeout, a count that wraps,
  * the frame counter ownership rule with its seeding, window and hand-back,
- * and the bump of a counter word with flip pacing off and on.
+ * the bump of a counter word with flip pacing off and on, and the vblank a
+ * present waits for.
  */
 #include "nv2a_flip_hold.h"
 
@@ -277,6 +278,34 @@ int main(void)
         check(xbox_FrameCounterBump(&b, &word, 1, ms += 100)
               == XBOX_FRAME_COUNTER_HANDED_BACK && word == 74,
               "on: quiet 300 ms, handed back and bumped");
+    }
+
+    printf("flip hold: the vblank a present waits for\n");
+    {
+        uint32_t due = 0;
+        memset(&h, 0, sizeof h);
+        check(!xbox_FlipHoldDue(&h, &due), "no due vblank before the first flip");
+        fresh(&h, 0, 700);
+        check(xbox_FlipHoldDue(&h, &due) && due == 701, "interval 1: due 701");
+        xbox_FlipHoldSwap(&h, swap(1, 0));
+        check(!xbox_FlipHoldStall(&h, 701, t, 1) && h.last_flip == 701,
+              "a stall after waiting for it is not held");
+        check(xbox_FlipHoldDue(&h, &due) && due == 702, "then due 702");
+        xbox_FlipHoldSwap(&h, swap(1, 0));
+        xbox_FlipHoldStall(&h, 701, t, 1);
+        check(h.held && xbox_FlipHoldDue(&h, &due) && due == 703,
+              "held to 702: the next is due 703");
+        xbox_FlipHoldPoll(&h, 702, t + MS, 1);
+        check(!h.held && xbox_FlipHoldDue(&h, &due) && due == 703,
+              "the same once released");
+        xbox_FlipHoldSwap(&h, swap(2, 0));
+        check(!xbox_FlipHoldStall(&h, 704, t, 1), "interval 2, on time at 704: not held");
+        check(xbox_FlipHoldDue(&h, &due) && due == 706, "interval 2: due 706");
+        xbox_FlipHoldSwap(&h, swap(0, 1));
+        xbox_FlipHoldStall(&h, 706, t, 1);
+        check(!xbox_FlipHoldDue(&h, &due), "IMMEDIATE: nothing to wait for");
+        fresh(&h, 1, 800);
+        check(!xbox_FlipHoldDue(&h, &due), "edge rule: nothing to wait for");
     }
 
     printf("%s\n", failures ? "FAIL" : "PASS");

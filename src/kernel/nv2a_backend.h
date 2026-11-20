@@ -152,4 +152,13 @@ void nv2a_pb_set_draws_off(int off);
  * default 200; 0 turns this off). */
 void nv2a_pb_flip_hold_wait(void);
 
+/* For a backend that presents on the title's thread (in its Swap): wait
+ * until the vblank the frame is due on (RECOMP_FLIP_PACING; see
+ * xbox_FlipHoldDue), at most XBOX_FLIP_HOLD_MAX_NS, then present. Without
+ * it the present lands whenever the title reaches its Swap, which the hold
+ * leaves anywhere in the frame after the vblank. Returns 1 if it waited, 0
+ * at once with pacing off, no flip to measure from, IMMEDIATE, or the
+ * vblank already reached. */
+int nv2a_pb_flip_present_wait(void);
+
 #endif /* NV2A_BACKEND_H */
