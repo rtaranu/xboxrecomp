@@ -138,6 +138,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_PRESENT_FILTER` | default | Sampler filter for the D3D11 present. | `gpu_present.c` |
 | `RECOMP_VIDEO_WIDESCREEN=1` | off | Advertises the widescreen EEPROM flag to the title. This does not resize the host window or renderer output. | `kernel_xbox.c` |
 | `RECOMP_VIDEO_480P=1` | off | Advertises the 480p EEPROM flag to the title. This does not change host presentation by itself. | `kernel_xbox.c` |
+| `RECOMP_VIDEO=<letters>` | off | Adds dashboard video flags: `w` widescreen, `l` letterbox, `p` 480p, `h` 720p, `i` 1080i. Like the two above, the title only reads them. | `kernel_xbox.c` |
 | `RECOMP_FMV_HOST` | off | Plays a movie through the host player when the title asks to. A substitute for the title's own output. | `kernel_bridge.c` |
 | `RECOMP_FMV_DUMP=<prefix>` | off | Writes two frames of a movie as BMP evidence. | `video_pump.c` |
 

@@ -74,16 +74,31 @@ XBOX_ANSI_STRING xbox_XeImageFileName = {
 static XBOX_LAUNCH_DATA_PAGE g_launch_data_page = {0};
 XBOX_LAUNCH_DATA_PAGE* xbox_LaunchDataPage = &g_launch_data_page;
 
+/* The dashboard's video settings: NTSC 480i at 60 Hz, 4:3, plus the modes
+ * turned on by RECOMP_VIDEO_WIDESCREEN=1, RECOMP_VIDEO_480P=1 or
+ * RECOMP_VIDEO=<letters>: w (widescreen), l (letterbox), p (480p), h (720p),
+ * i (1080i). Titles that support them read these to pick the picture's
+ * shape and their display mode. */
 static ULONG video_flags(void)
 {
     ULONG flags = XC_VIDEO_FLAGS_60Hz;
     const char *widescreen = getenv("RECOMP_VIDEO_WIDESCREEN");
     const char *progressive = getenv("RECOMP_VIDEO_480P");
+    const char *e = getenv("RECOMP_VIDEO");
 
     if (widescreen && strcmp(widescreen, "1") == 0)
         flags |= XC_VIDEO_FLAGS_WIDESCREEN;
     if (progressive && strcmp(progressive, "1") == 0)
         flags |= XC_VIDEO_FLAGS_HDTV_480p;
+    for (; e && *e; e++) {
+        switch (*e) {
+        case 'w': flags |= XC_VIDEO_FLAGS_WIDESCREEN; break;
+        case 'l': flags |= XC_VIDEO_FLAGS_LETTERBOX; break;
+        case 'p': flags |= XC_VIDEO_FLAGS_HDTV_480p; break;
+        case 'h': flags |= XC_VIDEO_FLAGS_HDTV_720p; break;
+        case 'i': flags |= XC_VIDEO_FLAGS_HDTV_1080i; break;
+        }
+    }
     return flags;
 }
 
