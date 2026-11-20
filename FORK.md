@@ -104,7 +104,7 @@ lands.
 
 | Branch | Base | Where | What |
 |---|---|---|---|
-| `nv2a-ack-thread` | d01b97a | fork, worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
+| `nv2a-ack-thread` | c14046c | fork (pre-rebase tip 9aa8eef there), worktree `xboxrecomp-ack` | the ack thread sleeps between kickoffs (`RECOMP_ACK_SLEEP`); design in `docs/technical/nv2a-ack-thread.md` |
 | `mem2` | d5098a4 | fork, worktree `xboxrecomp-mem` | memory model 2 behind `RECOMP_MEM_MODEL=2`; design in `docs/technical/memory-experiment.md` |
 | `flip-due` | `nv2a-ack-thread` (9aa8eef) | local, worktree `xboxrecomp-bo3` (Third Degree Burns' pin) | 621f8e5, the same change as 4f22d57 above, on the ack thread; goes when Third Degree Burns pins `splintercell` or the ack thread lands |
 
