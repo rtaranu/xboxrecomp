@@ -4330,8 +4330,11 @@ static uint32_t s_subch_class[8];
 
 /* The semaphore's memory object (SET_CONTEXT_DMA_SEMAPHORE, 0x1A4): where it
  * starts in guest memory and its last byte's offset. 0: none, or not a
- * linear object that is present. */
+ * linear object that is present. Kept until the next 0x1A4: a release sent
+ * after the title frees the object and before it binds another would land
+ * in the freed memory. Not handled. */
 static uint32_t s_sem_base, s_sem_limit;
+static int s_sem_taken;       /* the object has taken a release since bound */
 
 static void semaphore_object(uint32_t handle)
 {
@@ -4345,9 +4348,11 @@ static void semaphore_object(uint32_t handle)
         base = XBOX_CONTIG_BASE | (phys & 0x0FFFFFFFu);
         limit = o[1];
     }
-    if (base != s_sem_base || limit != s_sem_limit)
+    if (base != s_sem_base || limit != s_sem_limit) {
         fprintf(stderr, "[PB] semaphore object 0x%X: 0x%08X, limit 0x%X%c",
                 handle, base, limit, 10);
+        s_sem_taken = 0;
+    }
     s_sem_base = base;
     s_sem_limit = limit;
 }
@@ -4370,8 +4375,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         static int refused;
 
         if (s_sem_base && off <= s_sem_limit && s_sem_limit - off >= 3u
-                && guest_span_ok((uint64_t)s_sem_base + off, 4))
+                && guest_span_ok((uint64_t)s_sem_base + off, 4)) {
             va = s_sem_base + off;
+            s_sem_taken = 1;
+        }
         if (va) {
             uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
             *(volatile uint32_t *)(mem + va) = param;
@@ -4473,7 +4480,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         if (!said++)
             fprintf(stderr, "[PB] pattern colour kept in PGRAPH 0x400B10"
                     " (subchannel %u)%c", subch, 10);
-        if (!s_sem_va && !s_sem_base) {
+        if (!s_sem_va && !s_sem_taken) {
             uint32_t va = xbox_Nv2aFenceWordVa();
 
             if (va) {
