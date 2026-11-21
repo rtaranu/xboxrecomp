@@ -137,13 +137,26 @@ int main(void)
           "no policy, no cap: as asked");
     xbox_FlipHoldPoll(&h, 266, t, 1);
     xbox_FlipHoldForceCap(&h, 0);
+    s_policy_calls = 0;
     check(!xbox_FlipHoldSetCap(&h, 1) && !xbox_FlipHoldSetPolicy(&h, policy_to_one)
-          && h.interval_max == 0 && !h.policy,
+          && xbox_FlipHoldCap(&h) == 0,
           "forced: the title's cap and policy change nothing");
     xbox_FlipHoldSwap(&h, swap(2, 0));
-    check(xbox_FlipHoldStall(&h, 266, t, 1) && h.target == 268,
-          "forced 0: as asked");
+    check(xbox_FlipHoldStall(&h, 266, t, 1) && h.target == 268
+          && s_policy_calls == 0,
+          "forced 0: as asked, the policy not asked");
     xbox_FlipHoldPoll(&h, 268, t, 1);
+    xbox_FlipHoldReleaseCap(&h);
+    check(xbox_FlipHoldCap(&h) == 1, "released: the title's last cap");
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 268, t, 1) && h.target == 269
+          && s_policy_calls == 1,
+          "released: the title's last policy decides again");
+    xbox_FlipHoldPoll(&h, 269, t, 1);
+    xbox_FlipHoldForceCap(&h, 2);
+    xbox_FlipHoldSwap(&h, swap(3, 0));
+    check(xbox_FlipHoldStall(&h, 269, t, 1) && h.target == 271,
+          "forced again, to 2 while running: a THREE frame held for two");
     fresh(&h, 0, 270);
     xbox_FlipHoldForceCap(&h, 1);
     xbox_FlipHoldSwap(&h, swap(3, 0));

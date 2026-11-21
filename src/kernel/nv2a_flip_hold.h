@@ -58,12 +58,14 @@ typedef struct {
     /* The interval a flip is held for, when it is not the one asked for
      * (docs/technical/flip-interval.md). interval_max: a swap asking for
      * more vblanks is held for this many (0: no cap), e.g. 1 shows a TWO
-     * title's frames at 60 Hz. policy, when set, decides instead. forced:
-     * RECOMP_FLIP_INTERVAL_MAX set both, and the title's calls change
-     * nothing. Written from the title's threads, read at each stall. */
+     * title's frames at 60 Hz. policy, when set, decides instead. Both are
+     * the title's and kept while forced. forced: forced_max is held to
+     * instead and the policy is not asked (RECOMP_FLIP_INTERVAL_MAX, or a
+     * debug switch). Written from the title's threads, read at each stall. */
     volatile unsigned interval_max;
     XboxFlipIntervalPolicy volatile policy;
-    int      forced;
+    volatile int      forced;
+    volatile unsigned forced_max;
     /* The latest swap NOP since the previous FLIP_STALL. */
     int      have_swap;
     unsigned swap_interval;
@@ -84,11 +86,17 @@ typedef struct {
 } XboxFlipHold;
 
 /* RECOMP_FLIP_INTERVAL_MAX: hold every flip for at most max vblanks (0: as
- * asked) and ignore the title's cap and policy from now on. */
+ * asked) and ignore the title's cap and policy until released. */
 void xbox_FlipHoldForceCap(XboxFlipHold *h, unsigned max);
 
-/* The title's cap (0: as asked) and policy (NULL: none). Return 0, changing
- * nothing, when the cap is forced. */
+/* End a forced cap: the title's last cap and policy decide again. */
+void xbox_FlipHoldReleaseCap(XboxFlipHold *h);
+
+/* The cap held to now: the forced one, else the title's. */
+unsigned xbox_FlipHoldCap(const XboxFlipHold *h);
+
+/* The title's cap (0: as asked) and policy (NULL: none). Kept while the cap
+ * is forced, for its release; return 0 then, as they change nothing yet. */
 int xbox_FlipHoldSetCap(XboxFlipHold *h, unsigned max);
 int xbox_FlipHoldSetPolicy(XboxFlipHold *h, XboxFlipIntervalPolicy fn);
 
