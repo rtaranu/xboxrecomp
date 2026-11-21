@@ -43,8 +43,27 @@ extern "C" {
 /* A vblank count that has not moved for this long is not a clock. */
 #define XBOX_FLIP_CLOCK_STALE_NS 100000000ull
 
+/* A title's per-frame choice: given the interval its swap asked for (0 for
+ * IMMEDIATE; 0-3, more reads as 3), the interval to hold the flip for (0
+ * flips at once; above 3 reads as 3). Answering what it was asked keeps
+ * the swap's own interval, so a policy cannot cut a swap's 4-7 (which XDK
+ * D3D does not write) to 3. Runs on the GPU thread at each
+ * FLIP_STALL: it may read guest memory but must not call guest code or
+ * block. One call may still be running, or start, just after the policy is
+ * cleared or replaced: it and what it reads stay valid for the whole run. */
+typedef unsigned (*XboxFlipIntervalPolicy)(unsigned asked);
+
 typedef struct {
     int      edge;          /* RECOMP_FLIP_PACING=edge: D3D's rule */
+    /* The interval a flip is held for, when it is not the one asked for
+     * (docs/technical/flip-interval.md). interval_max: a swap asking for
+     * more vblanks is held for this many (0: no cap), e.g. 1 shows a TWO
+     * title's frames at 60 Hz. policy, when set, decides instead. forced:
+     * RECOMP_FLIP_INTERVAL_MAX set both, and the title's calls change
+     * nothing. Written from the title's threads, read at each stall. */
+    volatile unsigned interval_max;
+    XboxFlipIntervalPolicy volatile policy;
+    int      forced;
     /* The latest swap NOP since the previous FLIP_STALL. */
     int      have_swap;
     unsigned swap_interval;
@@ -60,9 +79,18 @@ typedef struct {
     uint32_t stall_count;
     uint64_t held_since_ns;
     /* Statistics, for the [GPU] report; the caller resets them. */
-    uint32_t holds, timeouts, clock_stops, nonop, iv[4];
+    uint32_t holds, timeouts, clock_stops, nonop, iv[4], changed;
     uint64_t held_ns;
 } XboxFlipHold;
+
+/* RECOMP_FLIP_INTERVAL_MAX: hold every flip for at most max vblanks (0: as
+ * asked) and ignore the title's cap and policy from now on. */
+void xbox_FlipHoldForceCap(XboxFlipHold *h, unsigned max);
+
+/* The title's cap (0: as asked) and policy (NULL: none). Return 0, changing
+ * nothing, when the cap is forced. */
+int xbox_FlipHoldSetCap(XboxFlipHold *h, unsigned max);
+int xbox_FlipHoldSetPolicy(XboxFlipHold *h, XboxFlipIntervalPolicy fn);
 
 /* A NO_OPERATION parameter. Returns 1 when it is the swap (software method
  * 1) and was recorded, 0 for anything else, which changes nothing. */

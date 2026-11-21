@@ -4560,11 +4560,27 @@ int nv2a_pb_exec_flip_pacing(void)
         const char *e = getenv("RECOMP_FLIP_PACING");
         int m = (!e || !*e || !strcmp(e, "0")) ? 0
                 : !strcmp(e, "edge") ? 2 : 1;
+        const char *cap = getenv("RECOMP_FLIP_INTERVAL_MAX");
         s_flip_hold.edge = m == 2;
+        /* Set (0-3), it overrides the title's own cap and policy: 0 holds
+         * every flip as asked, 1 at most one vblank. Unset, the title
+         * decides (xbox_FlipIntervalMaxSet, xbox_FlipIntervalPolicySet). */
+        if (cap && *cap >= '0' && *cap <= '3' && !cap[1])
+            xbox_FlipHoldForceCap(&s_flip_hold, (unsigned)(*cap - '0'));
+        else if (cap && *cap)
+            fprintf(stderr, "  [GPU] RECOMP_FLIP_INTERVAL_MAX=%s ignored"
+                    " (0-3)\n", cap);
         mode = m;
         if (e)
             fprintf(stderr, "  [GPU] flip pacing %s (RECOMP_FLIP_PACING=%s)\n",
                     m == 0 ? "off" : m == 2 ? "edge" : "on", e);
+        if (m && s_flip_hold.forced)
+            fprintf(stderr, "  [GPU] flip interval cap forced to %u%s"
+                    " (RECOMP_FLIP_INTERVAL_MAX)\n", s_flip_hold.interval_max,
+                    s_flip_hold.interval_max ? "" : ", as asked");
+        else if (s_flip_hold.forced)
+            fprintf(stderr, "  [GPU] RECOMP_FLIP_INTERVAL_MAX ignored: flip"
+                    " pacing is off (RECOMP_FLIP_PACING)\n");
     }
     return mode;
 }
@@ -4614,6 +4630,60 @@ int nv2a_pb_exec_flip_due(uint32_t *due)
     return xbox_FlipHoldDue((const XboxFlipHold *)&s_flip_hold, due);
 }
 
+/* A title may call the setters every frame: a line only when something
+ * changes, and one for calls a forced cap ignores. */
+static void flip_interval_ignored(void)
+{
+    static volatile int said;
+    if (!said) {
+        said = 1;
+        fprintf(stderr, "  [GPU] the title's flip interval cap and policy are"
+                " ignored (RECOMP_FLIP_INTERVAL_MAX)\n");
+    }
+}
+
+/* The title's say in the flip interval (nv2a_backend.h). Each reads the
+ * environment first, so a forced cap is in place before the title's call. */
+int xbox_FlipIntervalMaxSet(unsigned max)
+{
+    unsigned was;
+    if (!nv2a_pb_exec_flip_pacing())
+        return 0;
+    if (max > 3)
+        max = 3;
+    was = s_flip_hold.interval_max;
+    if (!xbox_FlipHoldSetCap(&s_flip_hold, max)) {
+        flip_interval_ignored();
+        return 0;
+    }
+    if (was != max)
+        fprintf(stderr, "  [GPU] title sets flip interval cap %u\n", max);
+    return 1;
+}
+
+unsigned xbox_FlipIntervalMaxGet(void)
+{
+    if (!nv2a_pb_exec_flip_pacing())
+        return 0;
+    return s_flip_hold.interval_max;
+}
+
+int xbox_FlipIntervalPolicySet(XboxFlipIntervalPolicy fn)
+{
+    XboxFlipIntervalPolicy was;
+    if (!nv2a_pb_exec_flip_pacing())
+        return 0;
+    was = s_flip_hold.policy;
+    if (!xbox_FlipHoldSetPolicy(&s_flip_hold, fn)) {
+        flip_interval_ignored();
+        return 0;
+    }
+    if (was != fn)
+        fprintf(stderr, "  [GPU] title %s a flip interval policy\n",
+                fn ? "sets" : "clears");
+    return 1;
+}
+
 /* The hold's line in the periodic [GPU] report, then reset. */
 static void flip_hold_report(void)
 {
@@ -4622,10 +4692,12 @@ static void flip_hold_report(void)
         return;
     fprintf(stderr, "[GPU] flip hold: holds %u held_ms %.1f hold_timeouts %u"
             " clock_stops %u iv0 %u iv1 %u iv2 %u iv3 %u nonop %u"
-            " counters_owned %u\n", h->holds, h->held_ns / 1e6, h->timeouts,
-            h->clock_stops, h->iv[0], h->iv[1], h->iv[2], h->iv[3], h->nonop,
-            xbox_Nv2aFrameCountersOwned());
-    h->holds = h->timeouts = h->clock_stops = h->nonop = 0;
+            " changed %u (%s, cap %u) counters_owned %u\n", h->holds,
+            h->held_ns / 1e6, h->timeouts, h->clock_stops, h->iv[0],
+            h->iv[1], h->iv[2], h->iv[3], h->nonop, h->changed,
+            h->forced ? "forced" : h->policy ? "policy" : "title",
+            h->interval_max, xbox_Nv2aFrameCountersOwned());
+    h->holds = h->timeouts = h->clock_stops = h->nonop = h->changed = 0;
     h->iv[0] = h->iv[1] = h->iv[2] = h->iv[3] = 0;
     h->held_ns = 0;
 }
