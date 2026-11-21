@@ -6,8 +6,10 @@
 #
 # 1. Fetches origin (upstream) and fork, fast-forwards local main to
 #    origin/main (refuses if main has commits of its own).
-# 2. Tags the integration branch's tip integration-<date> (-2, -3... if the
-#    name is taken), so commits the games pin stay reachable.
+# 2. Tags the integration branch's tip integration-<version>, the upstream
+#    release it was built on (v0.17.0 gives integration-0.17.0; -2, -3... if
+#    the name is taken; the date when no release tag is found), so commits
+#    the games pin stay reachable.
 # 3. Rebases the branch onto main. Commits upstream took unchanged drop out
 #    by themselves; --drop removes ones upstream took in another form (a PR
 #    with a test, a reworded fix). A merge commit is flattened.
@@ -52,11 +54,13 @@ if git merge-base --is-ancestor main HEAD && [ ${#drops[@]} -eq 0 ]; then
     exit 0
 fi
 
-# 2. Tag the old tip.
-tag=integration-$(date +%Y-%m-%d)
+# 2. Tag the old tip, named for the upstream release it was built on.
+base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null) \
+    || base=$(date +%Y-%m-%d)
+tag=integration-${base#v}
 n=2
 while git rev-parse -q --verify "refs/tags/$tag" >/dev/null; do
-    tag=integration-$(date +%Y-%m-%d)-$n
+    tag=integration-${base#v}-$n
     n=$((n + 1))
 done
 git tag -a "$tag" -m "$BRANCH before its rebuild onto $(git rev-parse --short main)" HEAD
