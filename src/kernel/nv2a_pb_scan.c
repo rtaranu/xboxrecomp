@@ -489,10 +489,6 @@ int nv2a_pb_dma_walk(void)
 static int s_in_call;
 int nv2a_pb_scan_in_call(void) { return s_in_call; }
 
-/* Where the last top-level JUMP of a scan pointed (0: none), for
- * nv2a_pb_scan_wrap. */
-static uint32_t s_jump_va;
-
 static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
                                 uint32_t *jumps, uint32_t *unknown)
 {
@@ -522,10 +518,8 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
             uint32_t target = (w & 3u) == 1u ? (w & 0xFFFFFFFCu)
                                              : (w & 0x1FFFFFFCu);
             (*jumps)++;
-            if (!in_call) {                   /* the ring: a jump ends it */
-                s_jump_va = 0x80000000u | (target & 0x0FFFFFFFu);
-                break;
-            }
+            if (!in_call)
+                break;                        /* the ring: a jump ends it */
             va = 0x80000000u | (target & 0x0FFFFFFFu);
             end_va = va + 0x400000u;
             continue;
@@ -589,10 +583,36 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
     s_tot_segments++;
 }
 
+/* Where the first top-level JUMP from va points, and the address just past
+ * it, without running anything (0: none before end_va or the window's end). */
+static uint32_t pb_find_jump(uint32_t va, uint32_t end_va, uint32_t *after)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
+    const uint32_t window_end = 0x80000000u + PB_RAM_BYTES;
+
+    if (end_va > window_end)
+        end_va = window_end;
+    while (va < end_va) {
+        uint32_t w = *(const uint32_t *)(mem + va);
+
+        va += 4;
+        if ((w & 3u) == 1u || (w & 0xE0000003u) == 0x20000000u) {
+            *after = va;
+            return 0x80000000u | (((w & 3u) == 1u ? w : w & 0x1FFFFFFFu)
+                                  & 0x0FFFFFFCu);
+        }
+        if ((w & 0x00030003u) == 0u)            /* skip the parameters */
+            va += ((w >> 18) & 0x7FFu) * 4u;
+    }
+    return 0;
+}
+
 /* PUT came back below where it was: the ring wrapped. The title left a JUMP
  * to the ring's start where it stopped writing, so walk up to that JUMP and
- * carry on from its target to PUT, as the GPU does. Returns 0 when no JUMP
- * turned up, and the caller falls back to the bounds it has learned.
+ * carry on from its target to PUT, as the GPU does. Returns 0, having run
+ * nothing, when no JUMP to at or below PUT turns up (a reset or a new
+ * device, not a wrap: the words past the last PUT are stale), and the caller
+ * falls back to the bounds it has learned.
  *
  * The lowest PUT ever seen is not the ring's start once a title has made a
  * second device: Halo's first pushbuffer sat below its second, in memory
@@ -600,10 +620,12 @@ void nv2a_pb_scan_segment(uint32_t start_va, uint32_t end_va)
  * commands. */
 int nv2a_pb_scan_wrap(uint32_t start_va, uint32_t put_va)
 {
-    s_jump_va = 0;
-    nv2a_pb_scan_segment(start_va, start_va + 0x400000u);
-    if (!s_jump_va)
+    uint32_t after = 0;
+    uint32_t target = pb_find_jump(start_va, start_va + 0x400000u, &after);
+
+    if (!target || target > put_va)
         return 0;
-    nv2a_pb_scan_segment(s_jump_va, put_va);
+    nv2a_pb_scan_segment(start_va, after);
+    nv2a_pb_scan_segment(target, put_va);
     return 1;
 }
