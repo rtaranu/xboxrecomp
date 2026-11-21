@@ -530,8 +530,11 @@ static uint32_t pb_walk_segment(uint32_t va, uint32_t end_va, int in_call,
         uint32_t w;
 
         /* The 4 MB bounds are guesses: a pushbuffer near the top of the
-         * window ends where the window does. */
-        if (va < window_end && end_va > window_end)
+         * window ends where the window does, and a target past it (data
+         * read as a CALL or JUMP) is not followed. */
+        if (va >= window_end)
+            break;
+        if (end_va > window_end)
             end_va = window_end;
         w = *(const uint32_t *)(mem + va);
         va += 4;
