@@ -28,6 +28,7 @@
 #define NV2A_BACKEND_H
 
 #include <stdint.h>
+#include "nv2a_flip_hold.h"   /* XboxFlipIntervalPolicy */
 
 /* The colour surface being drawn into, in real (anti-aliased) pixels.
  * aa_sx/aa_sy give the anti-aliasing factor, so width/aa_sx is the logical
@@ -160,5 +161,24 @@ void nv2a_pb_flip_hold_wait(void);
  * at once with pacing off, no flip to measure from, IMMEDIATE, or the
  * vblank already reached. */
 int nv2a_pb_flip_present_wait(void);
+
+/* The title's say in how long a flip is held (RECOMP_FLIP_PACING; see
+ * docs/technical/flip-interval.md), for game code that knows when its frames
+ * can run faster than its swaps ask (gameplay timed on the clock) and when
+ * not (movies and logic stepped per frame).
+ *
+ * xbox_FlipIntervalMaxSet: hold a swap asking for more than max vblanks
+ * (0-3, more reads as 3) for max; 0 holds each as asked. Any thread, from
+ * the next flip.
+ * xbox_FlipIntervalMaxGet: the cap in force, the forced one included; 0
+ * with flip pacing off.
+ * xbox_FlipIntervalPolicySet: fn decides each frame instead (NULL clears);
+ * see XboxFlipIntervalPolicy for what it may do.
+ * Both setters return 0 and change nothing with flip pacing off or with
+ * RECOMP_FLIP_INTERVAL_MAX set, which overrides the title. They may be
+ * called every frame: only a change is logged. */
+int     xbox_FlipIntervalMaxSet(unsigned max);
+unsigned xbox_FlipIntervalMaxGet(void);
+int      xbox_FlipIntervalPolicySet(XboxFlipIntervalPolicy fn);
 
 #endif /* NV2A_BACKEND_H */

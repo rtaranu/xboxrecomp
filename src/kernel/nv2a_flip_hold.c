@@ -3,6 +3,29 @@
  */
 #include "nv2a_flip_hold.h"
 
+void xbox_FlipHoldForceCap(XboxFlipHold *h, unsigned max)
+{
+    h->policy = 0;
+    h->interval_max = max;
+    h->forced = 1;
+}
+
+int xbox_FlipHoldSetCap(XboxFlipHold *h, unsigned max)
+{
+    if (h->forced)
+        return 0;
+    h->interval_max = max;
+    return 1;
+}
+
+int xbox_FlipHoldSetPolicy(XboxFlipHold *h, XboxFlipIntervalPolicy fn)
+{
+    if (h->forced)
+        return 0;
+    h->policy = fn;
+    return 1;
+}
+
 int xbox_FlipHoldSwap(XboxFlipHold *h, uint32_t param)
 {
     uint32_t payload;
@@ -55,7 +78,30 @@ int xbox_FlipHoldStall(XboxFlipHold *h, uint32_t count, uint64_t now_ns,
     }
     h->have_swap = 0;
     h->swap_immediate = 0;
-    h->iv[interval < 3 ? interval : 3]++;
+    h->iv[interval < 3 ? interval : 3]++;   /* what the title asked for */
+    {
+        XboxFlipIntervalPolicy fn = h->policy;
+        unsigned max = h->interval_max, use = interval;
+        if (fn) {
+            /* The policy sees 0-3; an answer equal to what it was asked
+             * leaves the swap's interval alone. */
+            unsigned asked = interval < 3 ? interval : 3;
+            use = fn(asked);
+            if (use > 3)
+                use = 3;
+            if (use == asked)
+                use = interval;
+            /* A lengthened IMMEDIATE or ONE_OR_IMMEDIATE is a plain
+             * interval: late, it waits for the next vblank under edge. */
+            if (use > interval)
+                immediate = 0;
+        } else if (max && interval > max) {
+            use = max;
+        }
+        if (use != interval)
+            h->changed++;
+        interval = use;
+    }
     h->last_interval = interval;
 
     if (!interval || !h->have_last || !clock_ok) {

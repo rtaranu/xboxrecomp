@@ -5,7 +5,8 @@
  * the previous flip's vblank plus the swap's interval. Driven here with
  * made-up counts and clocks: interval 1 frames that finish 5 ms into a
  * vblank (held to the next edge), interval 2 (held to every second edge),
- * IMMEDIATE (never held), a Swap without its NOP (interval 1), a 20 ms frame
+ * interval 2 capped at 1, a title's policy and a forced cap, IMMEDIATE
+ * (never held), a Swap without its NOP (interval 1), a 20 ms frame
  * (not held, but held to the next edge under edge), a stopped vblank clock,
  * the 100 ms bound with and without vblanks, ONE_OR_IMMEDIATE under edge,
  * two stalls in one walk, last_flip after a timeout, a count that wraps,
@@ -44,6 +45,20 @@ static void fresh(XboxFlipHold *h, int edge, uint32_t first)
     xbox_FlipHoldStall(h, first, 0, 1);
 }
 
+/* A title's policy: one vblank while s_policy_one, else as asked. */
+static int s_policy_one = 1, s_policy_calls;
+static int s_policy_ret = -1;   /* 0 and up: answer this, whatever is asked */
+static unsigned s_policy_asked;
+
+static unsigned policy_to_one(unsigned asked)
+{
+    s_policy_calls++;
+    s_policy_asked = asked;
+    if (s_policy_ret >= 0)
+        return (unsigned)s_policy_ret;
+    return s_policy_one && asked > 1 ? 1 : asked;
+}
+
 int main(void)
 {
     XboxFlipHold h;
@@ -74,6 +89,121 @@ int main(void)
     check(!xbox_FlipHoldStall(&h, 204, t, 1) && h.last_flip == 204,
           "a frame two vblanks later is not held (a title's own pacing)");
     check(h.iv[2] == 2, "iv2 counted twice");
+
+    printf("flip hold: interval 2 capped at 1 (RECOMP_FLIP_INTERVAL_MAX)\n");
+    fresh(&h, 0, 250);
+    h.interval_max = 1;
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 250, t, 1) && h.target == 251,
+          "a TWO frame in the same vblank is held to 251, not 252");
+    check(!xbox_FlipHoldPoll(&h, 251, t + MS, 1), "released at 251");
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(!xbox_FlipHoldStall(&h, 252, t, 1) && h.last_flip == 252,
+          "a TWO frame one vblank later is not held");
+    {
+        uint32_t due = 0;
+        check(xbox_FlipHoldDue(&h, &due) && due == 253,
+              "the present is due one vblank on");
+    }
+    xbox_FlipHoldSwap(&h, swap(0, 1));
+    check(!xbox_FlipHoldStall(&h, 252, t, 1), "IMMEDIATE still flips at once");
+    check(h.iv[2] == 2 && h.changed == 2, "iv2 counts the ask, changed 2");
+
+    printf("flip interval: the title's policy, and a forced cap\n");
+    fresh(&h, 0, 260);
+    s_policy_calls = 0;
+    check(xbox_FlipHoldSetPolicy(&h, policy_to_one), "the title sets a policy");
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 260, t, 1) && h.target == 261,
+          "the policy holds a TWO frame for one");
+    check(s_policy_calls == 1 && s_policy_asked == 2,
+          "the policy is asked once, with 2");
+    xbox_FlipHoldPoll(&h, 261, t, 1);
+    s_policy_one = 0;   /* the title's movie starts: back to as asked */
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 261, t, 1) && h.target == 263,
+          "then as asked: held to 263");
+    xbox_FlipHoldPoll(&h, 263, t, 1);
+    s_policy_one = 1;
+    h.interval_max = 3;   /* a cap the policy overrides */
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 263, t, 1) && h.target == 264,
+          "a policy decides over the title's cap");
+    xbox_FlipHoldPoll(&h, 264, t, 1);
+    check(xbox_FlipHoldSetPolicy(&h, 0) && xbox_FlipHoldSetCap(&h, 0),
+          "the title clears its policy and cap");
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 264, t, 1) && h.target == 266,
+          "no policy, no cap: as asked");
+    xbox_FlipHoldPoll(&h, 266, t, 1);
+    xbox_FlipHoldForceCap(&h, 0);
+    check(!xbox_FlipHoldSetCap(&h, 1) && !xbox_FlipHoldSetPolicy(&h, policy_to_one)
+          && h.interval_max == 0 && !h.policy,
+          "forced: the title's cap and policy change nothing");
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 266, t, 1) && h.target == 268,
+          "forced 0: as asked");
+    xbox_FlipHoldPoll(&h, 268, t, 1);
+    fresh(&h, 0, 270);
+    xbox_FlipHoldForceCap(&h, 1);
+    xbox_FlipHoldSwap(&h, swap(3, 0));
+    check(xbox_FlipHoldStall(&h, 270, t, 1) && h.target == 271,
+          "forced 1: a THREE frame held for one");
+
+    printf("flip interval: a policy's answers out of range, 0, and longer\n");
+    fresh(&h, 0, 280);
+    xbox_FlipHoldSetPolicy(&h, policy_to_one);
+    s_policy_ret = 7;
+    xbox_FlipHoldSwap(&h, swap(1, 0));
+    check(xbox_FlipHoldStall(&h, 280, t, 1) && h.target == 283,
+          "an answer above 3 holds for three");
+    xbox_FlipHoldPoll(&h, 283, t, 1);
+    s_policy_ret = -1;
+    s_policy_one = 0;
+    xbox_FlipHoldSwap(&h, swap(5, 0));
+    check(xbox_FlipHoldStall(&h, 283, t, 1) && h.target == 288
+          && s_policy_asked == 3 && h.changed == 1,
+          "a swap asking for 5 is put as 3, and left alone when agreed");
+    xbox_FlipHoldPoll(&h, 288, t, 1);
+    s_policy_one = 1;
+    s_policy_ret = 0;
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    {
+        uint32_t due = 0;
+        check(!xbox_FlipHoldStall(&h, 288, t, 1) && h.last_flip == 288
+              && !xbox_FlipHoldDue(&h, &due),
+              "answer 0: a TWO frame flips at once, no present due");
+    }
+    s_policy_ret = 2;
+    xbox_FlipHoldSwap(&h, swap(0, 1));
+    {
+        uint32_t due = 0;
+        check(xbox_FlipHoldStall(&h, 288, t, 1) && h.target == 290
+              && xbox_FlipHoldDue(&h, &due) && due == 292,
+              "an IMMEDIATE frame lengthened to two is held to 290");
+    }
+    fresh(&h, 1, 290);
+    xbox_FlipHoldSetPolicy(&h, policy_to_one);
+    xbox_FlipHoldSwap(&h, swap(0, 1));
+    check(xbox_FlipHoldStall(&h, 293, t, 1) && h.target == 294,
+          "edge: lengthened and late, it waits for the next vblank");
+    fresh(&h, 1, 300);
+    xbox_FlipHoldSetPolicy(&h, policy_to_one);
+    xbox_FlipHoldSwap(&h, swap(1, 1));   /* ONE_OR_IMMEDIATE */
+    check(xbox_FlipHoldStall(&h, 303, t, 1) && h.target == 304,
+          "edge: ONE_OR_IMMEDIATE lengthened and late waits too");
+    s_policy_ret = 1;
+    fresh(&h, 1, 300);
+    xbox_FlipHoldSetPolicy(&h, policy_to_one);
+    xbox_FlipHoldSwap(&h, swap(1, 1));
+    check(!xbox_FlipHoldStall(&h, 303, t, 1) && h.last_flip == 303,
+          "edge: ONE_OR_IMMEDIATE left as asked still flips at once");
+    s_policy_ret = -1;
+    fresh(&h, 1, 310);
+    xbox_FlipHoldSetCap(&h, 1);
+    xbox_FlipHoldSwap(&h, swap(2, 0));
+    check(xbox_FlipHoldStall(&h, 310, t, 1) && h.target == 311,
+          "edge: a TWO frame capped at 1 is held to the next vblank");
 
     printf("flip hold: IMMEDIATE, a missing NOP, other software methods\n");
     fresh(&h, 0, 300);
