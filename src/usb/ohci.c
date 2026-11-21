@@ -12,6 +12,7 @@
 #include "../platform/mmio_decode_x86_64.h"
 #include "../kernel/xbox_memory_layout.h"
 #include "../kernel/kernel.h"
+#include "../platform/host_time.h"
 #include "usb_gamepad.h"
 #include "../input/xinput_xbox.h"   /* xbox_InputSetState: rumble */
 
@@ -937,7 +938,26 @@ static int ohci_isr_call(int index)
     g_esp -= 4; *(uint32_t *)(mem + g_esp) = kinterrupt;   /* arg 1 */
     g_esp -= 4; *(uint32_t *)(mem + g_esp) = 0xDEADBEEFu;  /* return address */
 
-    { int _irql = xbox_IrqlEnterInterrupt(16); fn(); xbox_IrqlLeaveInterrupt(_irql); }
+    {
+        /* An ISR that runs long holds every other interrupt off with it:
+         * report the slow ones with the register reads they made. */
+        static volatile LONG slow_logged;
+        uint64_t t0 = xbox_HostNowNs(), ms;
+        uint32_t reads0 = s_hc[index].reads;
+        int _irql = xbox_IrqlEnterInterrupt(16);
+
+        fn();
+        xbox_IrqlLeaveInterrupt(_irql);
+        ms = (xbox_HostNowNs() - t0) / 1000000u;
+        if (ms >= 50 && InterlockedIncrement(&slow_logged) <= 50) {
+            fprintf(stderr, "  [OHCI%d] ISR 0x%08X ran %llu ms on tid %lu"
+                    " (from irql %d, now %d), %u register reads\n",
+                    index, routine, (unsigned long long)ms,
+                    (unsigned long)GetCurrentThreadId(), _irql,
+                    xbox_IrqlCurrent(), s_hc[index].reads - reads0);
+            fflush(stderr);
+        }
+    }
     return (int)(g_eax & 1u);
 }
 
