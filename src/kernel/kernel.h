@@ -903,6 +903,8 @@ void    xbox_IrqlLeaveInterrupt(int saved);
 int     xbox_IrqlThisThreadBlocksDpcs(void);
 /* This thread's IRQL (KPCR.Irql), for tests and reports. */
 int     xbox_IrqlCurrent(void);
+/* This thread's level and gate state, and every raised thread (stderr). */
+void    xbox_IrqlReportThread(void);
 
 /* Device interrupts on the one-CPU gate holder (kernel_hal.c).
  *

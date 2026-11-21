@@ -945,6 +945,17 @@ int xbox_IrqlCurrent(void)
     return (int)g_current_irql;
 }
 
+/* This thread's level and gate state, then every raised thread: a level
+ * left raised shows here as a level with no raise of its own to explain it. */
+void xbox_IrqlReportThread(void)
+{
+    fprintf(stderr, "  [IRQLHOLD] tid %lu: irql %d, counted %d, gate held %d,"
+            " gate depth %d\n", (unsigned long)GetCurrentThreadId(),
+            (int)g_current_irql, t_irql_counted, t_dispatch_gate_held,
+            t_gate_depth);
+    xbox_IrqlDumpHolders();
+}
+
 /*
  * KfRaiseIrql - Raises IRQL to the specified level.
  * Returns the previous IRQL. Uses __fastcall (ECX = NewIrql).
