@@ -4661,6 +4661,16 @@ static void contig_unlock(void)
     InterlockedExchange(&g_contig_lock, 0);
 }
 
+/* Bytes of RAM the console would be using now: the sum [MEM] reports (see
+ * below). Read without a lock. */
+uint32_t xbox_ConsoleRamUsedBytes(void)
+{
+    uint32_t live = g_heap_live_bytes, reserved = g_heap_reserved_bytes;
+
+    return g_image_bytes + (live > reserved ? live - reserved : 0)
+         + g_contig_pages_in_use * CONTIG_PAGE;
+}
+
 /* [MEM]: the most the title has held at once, against the console's RAM.
  *
  * What the console would spend pages on: the image's sections, the heap's
@@ -4681,7 +4691,7 @@ static void mem_peak_check(void)
     uint32_t heap_kb = (live > reserved ? live - reserved : 0) / 1024;
     uint32_t contig_kb = g_contig_pages_in_use * (CONTIG_PAGE / 1024);
     uint32_t image_kb = g_image_bytes / 1024;
-    LONG total_kb = (LONG)(image_kb + heap_kb + contig_kb);
+    LONG total_kb = (LONG)(xbox_ConsoleRamUsedBytes() / 1024);
     LONG seen = reported_kb;
 
     if (total_kb < seen + 1024
