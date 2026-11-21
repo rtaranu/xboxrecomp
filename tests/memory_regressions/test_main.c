@@ -48,6 +48,8 @@
  *                 above the RAM mirrors gets it, can commit inside it and use
  *                 the memory, is told the truth when it asks, and is refused
  *                 cleanly for an address that would alias live memory.
+ *   Every mode without the prefix below runs the classic model
+ *   (RECOMP_MEM_MODEL=1), whatever the host's default.
  *   mem2, mem2-<mode>  The mode under RECOMP_MEM_MODEL=2 (memory model 2;
  *                 "mem2" alone is heap-reclaim, which the model implies).
  *                 Check 8 and the tracker's range differ there; check 11
@@ -243,9 +245,10 @@ int main(int argc, char **argv)
         printf("unknown mode '%s'\n", mode);
         return 2;
     }
-    if (mem2)
-        set_env("RECOMP_MEM_MODEL", "2");
-    else if (reclaim)
+    /* Model 2 is the default on Windows: the other modes ask for the classic
+     * model by name. */
+    set_env("RECOMP_MEM_MODEL", mem2 ? "2" : "1");
+    if (!mem2 && reclaim)
         set_env("RECOMP_HEAP_RECLAIM", "1");
     if (mirrors)
         set_env("RECOMP_MIRRORS", "1");

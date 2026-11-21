@@ -1,7 +1,7 @@
 # Memory model 2: one owner per physical number
 
-Design document for memory model 2, which a title turns on with
-`RECOMP_MEM_MODEL=2`. It was first developed on a `memory-experiment` branch (since deleted)
+Design document for memory model 2, the default on Windows hosts since
+2026-11-20 (`RECOMP_MEM_MODEL=1` is the classic model, `=2` model 2). It was first developed on a `memory-experiment` branch (since deleted)
 as a rewrite of the default; the `mem2` branch carries the same design
 behind that switch, in `src/kernel/xbox_mem2.c` (section 7 says how the
 branch is laid out). It starts with the
@@ -330,9 +330,12 @@ apart and give the image numbers of its own.
 
 ### The switch and the branch layout
 
-`RECOMP_MEM_MODEL=2` turns the model on; unset (or `1`) is the classic
-model, byte for byte what the toolkit did before. A port sets it in its own
-`main.c` before the layout is initialised, like its other defaults.
+`RECOMP_MEM_MODEL=2` turns the model on and `1` is the classic model, byte
+for byte what the toolkit did before. Unset or empty, the model is on on
+Windows hosts, where the five titles were played with it, and off elsewhere,
+where it has not been run. A port can still set either in its own `main.c`
+before the layout is initialised, like its other defaults; the toolkit's
+tests ask for the classic model by name where they check it.
 
 The `mem2` branch is laid out to rebase onto upstream with little friction:
 
@@ -479,6 +482,7 @@ frame, then a played level.
 | 1 | Mirrors off by default | Done |
 | 2 | Virtual memory above RAM; named-page record deleted | Done |
 | 3 | One meaning for a physical number below 64 MB (shape 2) | Done |
+| | The default on Windows hosts | Done |
 | 4 | Later, separately: real reserve and commit for `NtAllocateVirtualMemory` (extending `guest_vmem` down to the arena); thread stacks at the size asked for; `MmQueryStatistics` from the toolkit's own counts (done: RAM less `[MEM]`'s sum); the block table's fixed size | Started |
 
 ### Verified
@@ -637,9 +641,8 @@ The trade against the old layout:
 
 ## 13. Not decided
 
-- **Whether a port sets `RECOMP_MEM_MODEL=2`.** Its
-  `RECOMP_CONTIG_AVOID_IMAGE=1` can then go: top-down filling ignores it
-  (section 7).
+- **A port's `RECOMP_CONTIG_AVOID_IMAGE=1`** can go now that the model is
+  the default on Windows: top-down filling ignores it (section 7).
 - **A hardware reference for top-down filling.** It rests on the toolkit's
   own notes and on five titles played.
 - **Other weak points, untouched:** the 65,536-entry block table stops
@@ -648,6 +651,5 @@ The trade against the old layout:
   upstream's policy keeps behind a switch. The `mem2` branch is that switch;
   whether and how to propose it (the interface between the two models) is
   not decided.
-- **Whether a port sets `RECOMP_MEM_MODEL=2` itself.** None does yet: the
-  ports pin an older toolkit, and the experiment builds pass it in the
-  environment.
+- **The default on POSIX hosts.** The classic model until the model has
+  been run there.

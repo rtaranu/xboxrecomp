@@ -15,7 +15,8 @@
 extern "C" {
 #endif
 
-/* RECOMP_MEM_MODEL=2. Read once. */
+/* RECOMP_MEM_MODEL=2, or unset on Windows; =1 is the classic model. Read
+ * once. */
 int xbox_mem2_on(void);
 /* RECOMP_MIRRORS=1: the RAM mirrors are wanted although the model is on. */
 int xbox_mem2_mirrors_on(void);
