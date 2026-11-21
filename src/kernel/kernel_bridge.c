@@ -2489,6 +2489,8 @@ static void bugcheck_log_site(void)
         fprintf(stderr, "%s%08X", (i % 8) ? " " : "\n    ",
                 (uint32_t)BRIDGE_MEM32(g_esp + i * 4));
     fprintf(stderr, "\n");
+    /* Code 0xA is IRQL_NOT_LESS_OR_EQUAL: say which raise left it up. */
+    xbox_IrqlReportThread();
 }
 
 static void bridge_KeBugCheck(void)
