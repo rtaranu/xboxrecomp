@@ -30,6 +30,7 @@ One per stage, in the order you run them.
 ### Recompiled code
 
 - [The Register Model](technical/register-model.md) — Why global registers work and how the stack is simulated
+- [The Flip Interval](technical/flip-interval.md) — Showing a 30 fps title's frames at 60: the game's cap, policy and the forced override
 - [Indirect Call Dispatch](technical/indirect-calls.md) — The RECOMP_ICALL problem and how to solve it
 - [SEH and Exception Handling](technical/seh-handling.md) — Structured exception handling in recompiled code
 - [Recovering a Split Function](technical/function-coalescence.md) — When the detector splits one function at an interior branch target: `--coalesce-functions`
