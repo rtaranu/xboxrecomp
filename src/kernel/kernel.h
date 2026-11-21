@@ -666,6 +666,7 @@ VOID    __stdcall xbox_MmUnmapIoSpace(PVOID BaseAddress, ULONG NumberOfBytes);
 ULONG_PTR __stdcall xbox_MmGetPhysicalAddress(PVOID BaseAddress);
 
 VOID    __stdcall xbox_MmPersistContiguousMemory(PVOID BaseAddress, ULONG NumberOfBytes, BOOLEAN Persist);
+void    xbox_PersistMark(uint32_t va, uint32_t size, int on);   /* the ranges a quick reboot keeps */
 ULONG   __stdcall xbox_MmQueryAddressProtect(PVOID VirtualAddress);
 VOID    __stdcall xbox_MmSetAddressProtect(PVOID BaseAddress, ULONG NumberOfBytes, ULONG NewProtect);
 ULONG   __stdcall xbox_MmQueryAllocationSize(PVOID BaseAddress);

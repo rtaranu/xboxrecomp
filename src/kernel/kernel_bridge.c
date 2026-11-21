@@ -195,6 +195,8 @@ static uint32_t kernel_data_va_for_ordinal(ULONG ordinal)
     }
 }
 
+static void persist_restore(void);
+
 /**
  * Initialize kernel data export values at the kernel data area.
  * Called during bridge init, after Xbox memory is mapped.
@@ -285,6 +287,10 @@ static void kernel_data_init(void)
             BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE) = 0;
         }
     }
+
+    /* And the contiguous memory the previous image persisted, before the
+     * title can be handed its pages. */
+    persist_restore();
 
     /* Object-type exports. Each gets a DISTINCT non-zero value rather than 0.
      *
@@ -1026,6 +1032,132 @@ static void contig_protect(uint32_t xbox_va, uint32_t size, uint32_t prot)
         xbox_MmSetAddressProtect(XBOX_TO_NATIVE(xbox_va), size, prot);
 }
 
+/* Contiguous memory kept through a quick reboot (MmPersistContiguousMemory).
+ *
+ * D3D's PersistDisplay copies the shown frame into a block, persists it and
+ * names it with AvSetSavedDataAddress; the next image finds it there and can
+ * show it while it loads (a briefing with the loading bar drawn over it). The
+ * self-relaunch is a new process, so the ranges'
+ * bytes and the saved address go to a file (RECOMP_SAVED_DATA) and come back
+ * at the same addresses before the title starts. */
+#define PERSIST_MAX 8
+#define PERSIST_MAGIC 0x50534458u   /* "XDSP" */
+static struct { uint32_t va, size; } s_persist[PERSIST_MAX];
+
+/* A range in the contiguous window, and allocated: the only kind the next
+ * process can be given back at the same address. */
+static int persist_range_ok(uint32_t va, uint32_t size)
+{
+    return va >= XBOX_CONTIG_BASE && size
+        && (uint64_t)va + size <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE
+        && xbox_ContiguousBlockSize(va) >= size;
+}
+
+/* MmPersistContiguousMemory, for both dispatch paths (and the free, with
+ * on = 0: a freed block is not kept). */
+void xbox_PersistMark(uint32_t va, uint32_t size, int on)
+{
+    int i, slot = -1;
+
+    for (i = 0; i < PERSIST_MAX; i++) {
+        if (s_persist[i].size && s_persist[i].va == va) {
+            slot = i;
+            break;
+        }
+        if (!s_persist[i].size && slot < 0)
+            slot = i;
+    }
+    if (!on) {
+        if (slot >= 0 && s_persist[slot].va == va)
+            s_persist[slot].size = 0;
+        return;
+    }
+    if (slot < 0) {
+        fprintf(stderr, "  [KERNEL] MmPersistContiguousMemory: more than %d"
+                " ranges, 0x%08X not kept\n", PERSIST_MAX, va);
+        return;
+    }
+    s_persist[slot].va = va;
+    s_persist[slot].size = size;
+}
+
+#ifdef _WIN32
+/* Before the relaunch: 1 if there was something to keep and all of it was
+ * written. The launch data page is left out: it travels in RECOMP_LAUNCH_DATA,
+ * and the next process reads its copy of it, so this one would never be freed
+ * and each relaunch would carry one more. */
+static int persist_save(const char *file)
+{
+    uint32_t launch = BRIDGE_MEM32(XBOX_KERNEL_DATA_BASE + KDATA_LAUNCH_DATA_PAGE);
+    uint32_t hd[3] = { PERSIST_MAGIC, xbox_AvGetSavedDataAddress(), 0 };
+    FILE *f;
+    int i, ok;
+
+    for (i = 0; i < PERSIST_MAX; i++)
+        if (s_persist[i].size && s_persist[i].va != launch)
+            hd[2] += persist_range_ok(s_persist[i].va, s_persist[i].size);
+    if (!hd[2])
+        return 0;
+    if (!(f = fopen(file, "wb")))
+        return 0;
+    ok = fwrite(hd, sizeof hd, 1, f) == 1;
+    for (i = 0; ok && i < PERSIST_MAX; i++) {
+        uint32_t r[2] = { s_persist[i].va, s_persist[i].size };
+        if (!r[1] || r[0] == launch)
+            continue;
+        if (!persist_range_ok(r[0], r[1])) {
+            fprintf(stderr, "  [KERNEL] persisted 0x%08X (%u bytes) is not an"
+                    " allocated contiguous block; not kept\n", r[0], r[1]);
+            continue;
+        }
+        ok = fwrite(r, sizeof r, 1, f) == 1
+          && fwrite(XBOX_TO_NATIVE(r[0]), 1, r[1], f) == r[1];
+        if (ok)
+            fprintf(stderr, "  [KERNEL] persisted 0x%08X (%u bytes) kept for"
+                    " the next image\n", r[0], r[1]);
+    }
+    return (fclose(f) == 0) && ok;
+}
+#endif
+
+/* After a relaunch, before the title runs: each range at its address again
+ * (one that cannot be is skipped), and the saved address when the range it
+ * names came back. */
+static void persist_restore(void)
+{
+    const char *file = getenv("RECOMP_SAVED_DATA");
+    uint32_t hd[3], r[2], i, saved_back = 0;
+    FILE *f;
+
+    if (!file || !*file || !(f = fopen(file, "rb")))
+        return;
+    if (fread(hd, sizeof hd, 1, f) == 1 && hd[0] == PERSIST_MAGIC) {
+        for (i = 0; i < hd[2] && fread(r, sizeof r, 1, f) == 1; i++) {
+            if (r[0] < XBOX_CONTIG_BASE || !r[1]
+                    || (uint64_t)r[0] + r[1] > (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE) {
+                if (fseek(f, (long)r[1], SEEK_CUR) != 0)
+                    break;
+                continue;
+            }
+            xbox_ContiguousClaim(r[0], r[1]);
+            contig_protect(r[0], r[1], 0x04);   /* PAGE_READWRITE */
+            if (fread(XBOX_TO_NATIVE(r[0]), 1, r[1], f) != r[1]) {
+                memset(XBOX_TO_NATIVE(r[0]), 0, r[1]);   /* cut short */
+                break;
+            }
+            xbox_PersistMark(r[0], r[1], 1);
+            if (hd[1] >= r[0] && hd[1] - r[0] < r[1])
+                saved_back = 1;
+            fprintf(stderr, "  [KERNEL] persisted 0x%08X (%u bytes) restored"
+                    " from the previous image\n", r[0], r[1]);
+        }
+        if (saved_back)
+            xbox_AvSetSavedDataAddress(hd[1]);
+    }
+    fclose(f);
+    remove(file);
+}
+
 /* ── MmAllocateContiguousMemory (ordinal 165) ─────────────
  * PVOID MmAllocateContiguousMemory(ULONG NumberOfBytes)
  */
@@ -1178,6 +1310,7 @@ static void bridge_MmAllocateContiguousMemoryEx(void)
 static void bridge_MmFreeContiguousMemory(void)
 {
     uint32_t addr = STACK_ARG(0);
+    xbox_PersistMark(addr, 0, 0);   /* a freed block is not kept */
     /* Contiguous blocks come from their own arena, not the heap: passing
      * them to xbox_HeapFree found nothing, so none ever came back. */
     if (!xbox_ContiguousFree(addr))
@@ -1938,6 +2071,15 @@ static void bridge_HalReturnToFirmware(void)
                 fwrite(XBOX_TO_NATIVE(page), 1, 0x1000, f);
                 fclose(f);
                 SetEnvironmentVariableA("RECOMP_LAUNCH_DATA", file);
+                {
+                    char saved[MAX_PATH] = "";
+                    int kept = GetTempFileNameA(tmp, "xsd", 0, saved)
+                               && persist_save(saved);
+                    if (!kept && saved[0])
+                        remove(saved);
+                    SetEnvironmentVariableA("RECOMP_SAVED_DATA",
+                                            kept ? saved : NULL);
+                }
                 memset(&si, 0, sizeof si);
                 si.cb = sizeof si;
                 ok = CreateProcessW(NULL, GetCommandLineW(), NULL, NULL, TRUE,
@@ -5871,12 +6013,12 @@ static void bridge_MmMapIoSpace(void)
 /* ── MmPersistContiguousMemory (ordinal 178) ─────────────
  * VOID MmPersistContiguousMemory(PVOID BaseAddress, ULONG NumberOfBytes, BOOLEAN Persist)
  *
- * Marks contiguous memory as persistent across reboots (for save data).
- * No-op for recompilation.
+ * Marks contiguous memory to survive a quick reboot: see persist_save.
  */
 static void bridge_MmPersistContiguousMemory(void)
 {
-    /* No-op stub */
+    xbox_MmPersistContiguousMemory((PVOID)(uintptr_t)STACK_ARG(0), STACK_ARG(1),
+                                   (BOOLEAN)((STACK_ARG(2) & 0xFF) != 0));
     g_eax = 0;
 }
 

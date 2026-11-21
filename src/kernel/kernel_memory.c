@@ -205,8 +205,10 @@ ULONG_PTR __stdcall xbox_MmGetPhysicalAddress(PVOID BaseAddress)
 
 VOID __stdcall xbox_MmPersistContiguousMemory(PVOID BaseAddress, ULONG NumberOfBytes, BOOLEAN Persist)
 {
-    /* Xbox: mark memory to survive soft-reboot. No-op on Windows. */
-    XBOX_TRACE(XBOX_LOG_MEM, "MmPersistContiguousMemory(%p, %u, %d) - stub", BaseAddress, NumberOfBytes, Persist);
+    /* Kept through a quick reboot: the self-relaunch carries it to the next
+     * process (kernel_bridge.c, persist_save). The address is the guest's. */
+    XBOX_TRACE(XBOX_LOG_MEM, "MmPersistContiguousMemory(%p, %u, %d)", BaseAddress, NumberOfBytes, Persist);
+    xbox_PersistMark((uint32_t)(uintptr_t)BaseAddress, NumberOfBytes, Persist != 0);
 }
 
 ULONG __stdcall xbox_MmQueryAddressProtect(PVOID VirtualAddress)
