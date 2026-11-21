@@ -1,5 +1,6 @@
 /*
- * Memory model 2: RECOMP_MEM_MODEL=2.
+ * Memory model 2: RECOMP_MEM_MODEL=2, the default on Windows (=1 is the
+ * classic model).
  *
  * The classic model keeps the heap and the stacks in RAM above the image,
  * where an address doubles as a physical number, while the contiguous window
@@ -50,12 +51,21 @@ static void *g_image_window_view;    /* and at 0x80000000 + those */
 #define MEM2_PAGES  (XBOX_CONTIG_SIZE / MEM2_PAGE)
 static uint8_t g_contig_ever[MEM2_PAGES];
 
+/* The default when RECOMP_MEM_MODEL is unset or empty: model 2 on Windows,
+ * where it has been played; the classic model elsewhere, where it has not
+ * been run. */
+#if defined(_WIN32)
+#define MEM2_DEFAULT 1
+#else
+#define MEM2_DEFAULT 0
+#endif
+
 int xbox_mem2_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("RECOMP_MEM_MODEL");
-        on = e && e[0] == '2';
+        on = (e && e[0]) ? e[0] == '2' : MEM2_DEFAULT;
     }
     return on;
 }

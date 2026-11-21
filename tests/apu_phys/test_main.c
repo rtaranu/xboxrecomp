@@ -122,6 +122,12 @@ int main(int argc, char **argv)
     uint32_t a, b, c, w;
 
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* The classic model's numbering; test_mem2.c checks model 2. */
+#if defined(_WIN32)
+    _putenv_s("RECOMP_MEM_MODEL", "1");
+#else
+    setenv("RECOMP_MEM_MODEL", "1", 1);
+#endif
     xbe = load_file(path, &xbe_len);
     if (!xbe) {
         printf("cannot read %s -- run: python tools/conformance/mkxbe.py\n", path);
