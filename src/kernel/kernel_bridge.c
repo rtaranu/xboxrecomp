@@ -2477,10 +2477,25 @@ static void bridge_KeDelayExecutionThread(void)
  * failure surfaced later somewhere unrelated. Report the code and stop
  * pretending the call succeeded.
  */
+/* The call site and the stack above it: the code alone rarely says which
+ * check failed, and the return addresses further up name the path. */
+static void bugcheck_log_site(void)
+{
+    uint32_t i;
+
+    fprintf(stderr, "  [KERNEL]   from=0x%08X esp=0x%08X stack:",
+            g_xbox_kernel_caller, g_esp);
+    for (i = 0; i < 24; i++)
+        fprintf(stderr, "%s%08X", (i % 8) ? " " : "\n    ",
+                (uint32_t)BRIDGE_MEM32(g_esp + i * 4));
+    fprintf(stderr, "\n");
+}
+
 static void bridge_KeBugCheck(void)
 {
     fprintf(stderr, "  [KERNEL] *** KeBugCheck: code=0x%08X ***\n",
             STACK_ARG(0));
+    bugcheck_log_site();
     fflush(stderr);
     g_eax = 0;
 }
@@ -2491,6 +2506,7 @@ static void bridge_KeBugCheckEx(void)
             "(0x%08X, 0x%08X, 0x%08X, 0x%08X) ***\n",
             STACK_ARG(0), STACK_ARG(1), STACK_ARG(2),
             STACK_ARG(3), STACK_ARG(4));
+    bugcheck_log_site();
     fflush(stderr);
     g_eax = 0;
 }
