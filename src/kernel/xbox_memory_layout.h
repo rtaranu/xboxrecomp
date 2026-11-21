@@ -242,6 +242,9 @@ const volatile uint8_t *xbox_PhysRamNameMap(void);
  * the page map refined to the block (see xbox_PhysRamNamedAt). */
 int xbox_PhysRamNamedAt(uint32_t pa);
 uint32_t xbox_ContiguousInUseBytes(void);
+/* RAM the console would be using now: image, committed heap, contiguous pages
+ * (the sum [MEM] reports). */
+uint32_t xbox_ConsoleRamUsedBytes(void);
 
 int xbox_Nv2aMirrorFence(uint32_t device_ptr_va,
                          uint32_t put_off, uint32_t get_ptr_off);

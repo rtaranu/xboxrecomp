@@ -139,6 +139,15 @@ NTSTATUS __stdcall xbox_MmQueryStatistics(PXBOX_MM_STATISTICS MemoryStatistics)
     memset(MemoryStatistics, 0, sizeof(XBOX_MM_STATISTICS));
     MemoryStatistics->Length = sizeof(XBOX_MM_STATISTICS);
 
+    /* mem2: RAM less what the console would be using ([MEM]'s sum). Titles
+     * throttle on this figure; the arena absorbs what they allocate past it. */
+    if (xbox_mem2_on()) {
+        uint64_t ram = g_xbox_total_ram, used = xbox_ConsoleRamUsedBytes();
+        MemoryStatistics->TotalPhysicalPages = (ULONG)(ram / 4096);
+        MemoryStatistics->AvailablePages = (ULONG)(used < ram ? (ram - used) / 4096 : 0);
+        return STATUS_SUCCESS;
+    }
+
     /* Xbox has 64MB RAM. Report plausible values. */
     ULONG page_size = 4096;
     MemoryStatistics->TotalPhysicalPages = 64 * 1024 * 1024 / page_size; /* 16384 pages */

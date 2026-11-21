@@ -50,7 +50,8 @@
  *                 cleanly for an address that would alias live memory.
  *   mem2, mem2-<mode>  The mode under RECOMP_MEM_MODEL=2 (memory model 2;
  *                 "mem2" alone is heap-reclaim, which the model implies).
- *                 Check 8 and the tracker's range differ there.
+ *                 Check 8 and the tracker's range differ there; check 11
+ *                 (MmQueryStatistics) runs only there.
  *   ext-vma-128   The same switch on a 128 MB map, where the mirrors already
  *                 reach past user space. The tracker must stay out of the way
  *                 rather than reserve a range of negative size.
@@ -713,6 +714,27 @@ int main(int argc, char **argv)
             check(st == 0 && base == hi && *G(hi) == 0,
                   "reserving it again works, and the memory is zero", NULL);
         }
+    }
+
+    /* 11. Model 2: MmQueryStatistics is RAM less what the console would be
+     * using, so 1 MB of heap is 256 pages fewer and freeing it gives them
+     * back. Last, so the freed block moves no other check's addresses. */
+    if (mem2) {
+        XBOX_MM_STATISTICS s0, s1, s2;
+        uint32_t mb;
+        xbox_MmQueryStatistics(&s0);
+        mb = xbox_HeapAlloc(1024u * 1024u, 4096);
+        xbox_MmQueryStatistics(&s1);
+        xbox_HeapFree(mb);
+        xbox_MmQueryStatistics(&s2);
+        snprintf(d, sizeof d, "total %u, available %u -> %u -> %u pages",
+                 (unsigned)s0.TotalPhysicalPages, (unsigned)s0.AvailablePages,
+                 (unsigned)s1.AvailablePages, (unsigned)s2.AvailablePages);
+        check(mb && s0.TotalPhysicalPages == g_xbox_total_ram / 4096 &&
+              s0.AvailablePages < s0.TotalPhysicalPages &&
+              s0.AvailablePages - s1.AvailablePages == 256 &&
+              s2.AvailablePages == s0.AvailablePages,
+              "MmQueryStatistics counts 1 MB of heap as 256 pages used", d);
     }
 
     xbox_MemoryLayoutShutdown();
