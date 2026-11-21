@@ -49,7 +49,7 @@ Three layers, the first that is set wins:
 
 | Layer | Set by | Lasts |
 |---|---|---|
-| Forced cap | `RECOMP_FLIP_INTERVAL_MAX=0..3` | the whole run; the title's calls are ignored |
+| Forced cap | `RECOMP_FLIP_INTERVAL_MAX=0..3`, or `xbox_FlipIntervalMaxForce(max)` | until released (`xbox_FlipIntervalMaxForce(-1)`); the title's calls are kept, not used |
 | Policy | `xbox_FlipIntervalPolicySet(fn)` | until cleared (NULL) |
 | Cap | `xbox_FlipIntervalMaxSet(max)` | until set again |
 
@@ -71,6 +71,10 @@ Three layers, the first that is set wins:
   `1` shows every TWO frame at 60 (the cap on all the time), `0` holds every
   frame as asked whatever the game's code says. Unset or empty, the game
   decides. Any other value is reported and ignored.
+  `xbox_FlipIntervalMaxForce` is the same switch while running, for a
+  settings panel: 0-3 forces the cap, -1 releases it, and the title's last
+  cap and policy decide again. `xbox_FlipIntervalMaxForced` reads it back
+  (-1 when the title decides, -2 with flip pacing off).
 
 All three need `RECOMP_FLIP_PACING` (and so `RECOMP_VBLANK`): without the
 hold, nothing waits for the interval anyway. With pacing off, the two calls
@@ -78,13 +82,16 @@ and `xbox_FlipIntervalMaxGet` return 0, and a set
 `RECOMP_FLIP_INTERVAL_MAX` is reported as ignored.
 
 The declarations are in `src/kernel/nv2a_backend.h`. The pure rule
-(`xbox_FlipHoldSetCap`, `xbox_FlipHoldSetPolicy`, `xbox_FlipHoldForceCap`) is
+(`xbox_FlipHoldSetCap`, `xbox_FlipHoldSetPolicy`, `xbox_FlipHoldForceCap`,
+`xbox_FlipHoldReleaseCap`) is
 in `nv2a_flip_hold.c`.
 
 ## What the Log Shows
 
 - `[GPU] flip interval cap forced to N (RECOMP_FLIP_INTERVAL_MAX)`: the
   environment override is in force.
+- `[GPU] flip interval cap forced to N` / `flip interval cap no longer
+  forced: the title decides`: the switch changed while running.
 - `[GPU] RECOMP_FLIP_INTERVAL_MAX ignored: flip pacing is off`: it is set
   without `RECOMP_FLIP_PACING`.
 - `[GPU] title sets flip interval cap N` / `title sets|clears a flip

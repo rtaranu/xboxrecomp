@@ -3,27 +3,33 @@
  */
 #include "nv2a_flip_hold.h"
 
+/* The cap before the flag, so a stall that sees forced reads the new cap. */
 void xbox_FlipHoldForceCap(XboxFlipHold *h, unsigned max)
 {
-    h->policy = 0;
-    h->interval_max = max;
+    h->forced_max = max;
     h->forced = 1;
+}
+
+void xbox_FlipHoldReleaseCap(XboxFlipHold *h)
+{
+    h->forced = 0;
+}
+
+unsigned xbox_FlipHoldCap(const XboxFlipHold *h)
+{
+    return h->forced ? h->forced_max : h->interval_max;
 }
 
 int xbox_FlipHoldSetCap(XboxFlipHold *h, unsigned max)
 {
-    if (h->forced)
-        return 0;
     h->interval_max = max;
-    return 1;
+    return !h->forced;
 }
 
 int xbox_FlipHoldSetPolicy(XboxFlipHold *h, XboxFlipIntervalPolicy fn)
 {
-    if (h->forced)
-        return 0;
     h->policy = fn;
-    return 1;
+    return !h->forced;
 }
 
 int xbox_FlipHoldSwap(XboxFlipHold *h, uint32_t param)
@@ -80,8 +86,10 @@ int xbox_FlipHoldStall(XboxFlipHold *h, uint32_t count, uint64_t now_ns,
     h->swap_immediate = 0;
     h->iv[interval < 3 ? interval : 3]++;   /* what the title asked for */
     {
-        XboxFlipIntervalPolicy fn = h->policy;
-        unsigned max = h->interval_max, use = interval;
+        int forced = h->forced;
+        XboxFlipIntervalPolicy fn = forced ? 0 : h->policy;
+        unsigned max = forced ? h->forced_max : h->interval_max;
+        unsigned use = interval;
         if (fn) {
             /* The policy sees 0-3; an answer equal to what it was asked
              * leaves the swap's interval alone. */

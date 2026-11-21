@@ -200,9 +200,19 @@ int nv2a_pb_flip_present_wait(void);
  * see XboxFlipIntervalPolicy for what it may do.
  * Both setters return 0 and change nothing with flip pacing off or with
  * RECOMP_FLIP_INTERVAL_MAX set, which overrides the title. They may be
- * called every frame: only a change is logged. */
+ * called every frame: only a change is logged. A forced cap keeps what they
+ * set, which decides again once it is released. */
 int     xbox_FlipIntervalMaxSet(unsigned max);
 unsigned xbox_FlipIntervalMaxGet(void);
 int      xbox_FlipIntervalPolicySet(XboxFlipIntervalPolicy fn);
+
+/* A debug switch for the forced cap while running (a settings panel), the
+ * same as RECOMP_FLIP_INTERVAL_MAX: max 0-3 (more reads as 3) forces it,
+ * below 0 hands the cap back to the title. Any thread, from the next flip.
+ * Returns 0, changing nothing, with flip pacing off.
+ * xbox_FlipIntervalMaxForced: the forced cap; -1 when the title decides, -2
+ * with flip pacing off. */
+int      xbox_FlipIntervalMaxForce(int max);
+int      xbox_FlipIntervalMaxForced(void);
 
 #endif /* NV2A_BACKEND_H */

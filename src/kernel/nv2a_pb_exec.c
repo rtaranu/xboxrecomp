@@ -4576,8 +4576,8 @@ int nv2a_pb_exec_flip_pacing(void)
                     m == 0 ? "off" : m == 2 ? "edge" : "on", e);
         if (m && s_flip_hold.forced)
             fprintf(stderr, "  [GPU] flip interval cap forced to %u%s"
-                    " (RECOMP_FLIP_INTERVAL_MAX)\n", s_flip_hold.interval_max,
-                    s_flip_hold.interval_max ? "" : ", as asked");
+                    " (RECOMP_FLIP_INTERVAL_MAX)\n", s_flip_hold.forced_max,
+                    s_flip_hold.forced_max ? "" : ", as asked");
         else if (s_flip_hold.forced)
             fprintf(stderr, "  [GPU] RECOMP_FLIP_INTERVAL_MAX ignored: flip"
                     " pacing is off (RECOMP_FLIP_PACING)\n");
@@ -4665,7 +4665,7 @@ unsigned xbox_FlipIntervalMaxGet(void)
 {
     if (!nv2a_pb_exec_flip_pacing())
         return 0;
-    return s_flip_hold.interval_max;
+    return xbox_FlipHoldCap(&s_flip_hold);
 }
 
 int xbox_FlipIntervalPolicySet(XboxFlipIntervalPolicy fn)
@@ -4684,6 +4684,36 @@ int xbox_FlipIntervalPolicySet(XboxFlipIntervalPolicy fn)
     return 1;
 }
 
+/* A debug switch (a settings panel) forcing the cap while the title runs,
+ * as RECOMP_FLIP_INTERVAL_MAX does from the start. */
+int xbox_FlipIntervalMaxForce(int max)
+{
+    if (!nv2a_pb_exec_flip_pacing())
+        return 0;
+    if (max < 0) {
+        if (s_flip_hold.forced)
+            fprintf(stderr, "  [GPU] flip interval cap no longer forced:"
+                    " the title decides\n");
+        xbox_FlipHoldReleaseCap(&s_flip_hold);
+        return 1;
+    }
+    if (max > 3)
+        max = 3;
+    if (!s_flip_hold.forced || s_flip_hold.forced_max != (unsigned)max)
+        fprintf(stderr, "  [GPU] flip interval cap forced to %d%s\n", max,
+                max ? "" : ", as asked");
+    xbox_FlipHoldForceCap(&s_flip_hold, (unsigned)max);
+    return 1;
+}
+
+int xbox_FlipIntervalMaxForced(void)
+{
+    int m = nv2a_pb_exec_flip_pacing();
+    if (!m)
+        return -2;
+    return s_flip_hold.forced ? (int)s_flip_hold.forced_max : -1;
+}
+
 /* The hold's line in the periodic [GPU] report, then reset. */
 static void flip_hold_report(void)
 {
@@ -4696,7 +4726,7 @@ static void flip_hold_report(void)
             h->held_ns / 1e6, h->timeouts, h->clock_stops, h->iv[0],
             h->iv[1], h->iv[2], h->iv[3], h->nonop, h->changed,
             h->forced ? "forced" : h->policy ? "policy" : "title",
-            h->interval_max, xbox_Nv2aFrameCountersOwned());
+            xbox_FlipHoldCap(h), xbox_Nv2aFrameCountersOwned());
     h->holds = h->timeouts = h->clock_stops = h->nonop = h->changed = 0;
     h->iv[0] = h->iv[1] = h->iv[2] = h->iv[3] = 0;
     h->held_ns = 0;
