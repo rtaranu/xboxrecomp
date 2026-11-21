@@ -225,8 +225,10 @@ void apu_trace(const char *fmt, ...)
     va_end(ap);
     if (n < 0)
         return;
-    if (n >= (int)sizeof(line))
+    if (n >= (int)sizeof(line)) {         /* cut short, still one line */
         n = (int)sizeof(line) - 1;
+        line[n - 1] = '\n';
+    }
     qemu_mutex_lock(&s_tr.lock);
     if (s_tr.len + (size_t)n <= sizeof(s_tr.buf)) {
         memcpy(s_tr.buf + s_tr.len, line, (size_t)n);

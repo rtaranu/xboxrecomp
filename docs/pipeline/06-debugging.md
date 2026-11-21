@@ -400,9 +400,11 @@ them off.
   buffer that a logger thread writes every 50 ms. They appear up to 50 ms
   late against other stderr lines, and a slow reader (a PowerShell `2>`
   pipe) loses lines, counted in `[APU] trace: N lines dropped`, instead of
-  stalling the audio.
+  stalling the audio. The last 50 ms of lines before a crash or exit are
+  lost.
 - `RECOMP_APU_TRACE_REGS=1` prints every access to the APU's own registers
-  and the first 400 the title makes anywhere in the APU. It is thousands
+  and, on Windows, the first 400 the title makes anywhere in the APU
+  (`[APUMMIO]`). It is thousands
   of lines a second and slows the title's audio interrupt even buffered:
   use it to find what a title waits on, not while listening.
 - `RECOMP_APU_SOLO=<voice>` mixes only that voice.
