@@ -95,6 +95,22 @@ class UnimplementedMarkerTest(unittest.TestCase):
 
 class UnimplementedReportTest(unittest.TestCase):
 
+    def test_control_register_mov_carries_the_marker(self):
+        # `mov eax, cr3` / `mov cr3, eax` once came out as `eax = cr3;`,
+        # which does not compile: there is no cr3 in the generated C.
+        for op_str, operands in (("eax, cr3", (_reg("eax"), _reg("cr3"))),
+                                 ("cr3, eax", (_reg("cr3"), _reg("eax"))),
+                                 ("dr7, ecx", (_reg("dr7"), _reg("ecx")))):
+            lifter, out = _lift("mov", op_str, operands)
+            self.assertIn(f'RECOMP_UNIMPL("mov {op_str}", 0x00012340u);', out)
+            self.assertNotIn("cr3;", out.replace("TODO: mov eax, cr3", ""))
+            self.assertEqual(lifter.unimplemented, {"mov": [0x00012340]})
+
+    def test_ordinary_mov_has_no_marker(self):
+        lifter, out = _lift("mov", "eax, ecx", (_reg("eax"), _reg("ecx")))
+        self.assertNotIn("RECOMP_UNIMPL", out)
+        self.assertEqual(lifter.unimplemented, {})
+
     def test_summary_describes_runtime_calls(self):
         stderr = io.StringIO()
         with contextlib.redirect_stderr(stderr):
