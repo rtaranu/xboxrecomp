@@ -24,6 +24,7 @@ Start here when a title does not run. See [Step 6: Iterative Debugging](../pipel
 | `RECOMP_WATCH=<va>` | off | Names the guest code that writes a value at an address (a callback slot, a "ready" flag). Wrap the address in `[` `]` to watch the word it points to. | `xbox_memory_layout.c` |
 | `RECOMP_WATCH_LEN` | off | Length in bytes of the watched range. | `xbox_memory_layout.c` |
 | `RECOMP_WAIT_LOG=1` | off | One `[WAIT]` line for each single-object wait that timed out or lasted 500 ms or more. | `kernel_sync.c` |
+| `RECOMP_LOG_READS=1` | off | One `[READ]` line per file read: offset, length and the first bytes delivered. | `kernel_bridge.c` |
 | `RECOMP_WATCH_DEPTH` | 14 | Frames printed per watch hit; identical consecutive return addresses are folded. | `xbox_memory_layout.c` |
 | `RECOMP_WATCH_RAW` | off | Also prints the raw stack frame, to see which object the writer was working on. | `xbox_memory_layout.c` |
 | `RECOMP_KERNEL_WATCH=<va>` | off | Reports a guest address whenever a kernel bridge call changes it. | `kernel_bridge.c` |
