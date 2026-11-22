@@ -5083,6 +5083,32 @@ static int bridge_async_io_enabled(void)
 }
 
 /* ── NtReadFile (ordinal 219, 8 args = 32 bytes) ──────── */
+/* Touch each page of a buffer above the mirrors before a host call reads or
+ * writes it. A title with its own page-fault handler there (demand paging)
+ * keeps pages not present or protected until first use, and on the
+ * console the kernel's access faults into that handler. The host kernel does
+ * not raise the fault: ReadFile fails with ERROR_NOACCESS instead. A touch
+ * from here faults on this thread, where the title's handler can run. The
+ * write touch is an atomic OR of 0, so a concurrent writer loses nothing. */
+static void bridge_fault_in(uint32_t va, uint32_t bytes, int write)
+{
+    uint32_t page, info[7];
+    uint64_t end = (uint64_t)va + bytes;
+
+    if (!bytes || !guest_vmem_active() || !guest_vmem_query(va, info))
+        return;
+    for (page = va & ~0xFFFu; page < end; page += 0x1000) {
+        uint32_t at = page < va ? va & ~3u : page;
+        volatile LONG *p = (volatile LONG *)XBOX_TO_NATIVE(at);
+        if (write)
+            InterlockedOr(p, 0);
+        else
+            (void)*p;
+        if (page + 0x1000 < page)
+            break;
+    }
+}
+
 static void bridge_NtReadFile(void)
 {
     HANDLE   handle    = bridge_resolve_handle(STACK_ARG(0));
@@ -5105,6 +5131,7 @@ static void bridge_NtReadFile(void)
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
     }
+    bridge_fault_in(buffer_va, length, 1);
     g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
 
@@ -5187,6 +5214,7 @@ static void bridge_NtWriteFile(void)
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
     }
+    bridge_fault_in(buffer_va, length, 0);
     g_eax = (uint32_t)xbox_NtWriteFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
     bridge_write_iostatus(iostatus, ios.Status, (uint32_t)ios.Information);
