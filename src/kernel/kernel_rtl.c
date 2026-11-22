@@ -705,8 +705,11 @@ VOID __stdcall xbox_RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSectio
         volatile LONG* lock = (volatile LONG*)(g + 0x10);
         uint32_t* rec  = (uint32_t*)(g + 0x14);
         volatile uint32_t* owner = (volatile uint32_t*)(g + 0x18);
-        if (*owner != xbox_cs_guest_tid())
-            return;                        /* not ours: ignore, as the shadow does */
+        /* Any thread may release a held lock: a title may release one
+         * another of its threads took. Releasing a free one is ignored, as
+         * before; titles do it at start-up. */
+        if (*rec == 0)
+            return;
         if (--(*rec) == 0) {
             *owner = 0;
             if (InterlockedDecrement(lock) >= 0) {  /* waiters pending */
