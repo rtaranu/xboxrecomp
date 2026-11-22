@@ -2028,6 +2028,11 @@ class Lifter:
     def _lift_mov(self, insn, ops):
         if nops := len(ops) < 2:
             return [f"/* mov: bad operands */"]
+        # Control and debug registers (cr3 reloads, page-table walks) have no
+        # host equivalent; copied as names they made C that does not compile.
+        if any(op.type == "reg" and re.fullmatch(r"[cd]r\d+", op.reg or "")
+               for op in ops[:2]):
+            return self._unimplemented(insn, "mov")
         src = _fmt_operand_read(ops[1])
         out = [_fmt_operand_write(ops[0], src)]
         # `mov ebp, esp` establishes this function's frame. Publish it, because
