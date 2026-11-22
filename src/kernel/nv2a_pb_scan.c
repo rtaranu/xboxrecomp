@@ -258,6 +258,25 @@ static int pb_bad_target(uint32_t w, uint32_t at, uint32_t target, uint32_t put)
     }
     return 1;
 }
+/* The walk gives up and skips to PUT: everything between is lost, fence
+ * releases too, and the title may then wait for ever. A loop (a JUMP back
+ * to commands already run) shows as repeating flow lines. */
+static void pb_gave_up(uint32_t words, uint32_t unknown, uint32_t at, uint32_t put)
+{
+    static unsigned total;
+    unsigned k;
+    if (++total <= 16 || total % 100 == 0) {
+        fprintf(stderr, "  [PB] walk gave up #%u at 0x%08X (PUT 0x%08X): %s, %u words;"
+                        " skipped to PUT\n", total, at, put,
+                unknown > 64 ? "lost sync" : "word limit", words);
+        if (total <= 4)
+            for (k = 0; k < PB_HIST && k < s_flow_n; k++) {
+                unsigned i = (s_flow_n - 1 - k) % PB_HIST;
+                fprintf(stderr, "  [PB]   earlier flow 0x%08X at 0x%08X -> 0x%08X\n",
+                        s_flow[i].w, s_flow[i].at, s_flow[i].to);
+            }
+    }
+}
 static uint32_t s_get = 0xFFFFFFFFu, s_ret;
 static int      s_in_call;
 
@@ -396,6 +415,7 @@ void nv2a_pb_scan(uint32_t put_phys)
         s_hist_n++;
 
         if (++words > 0x400000u || unknown > 64) {
+            pb_gave_up(words, unknown, at, put);
             s_get = put, s_pend_left = 0;                      /* lost sync, or runaway */
             break;
         }
