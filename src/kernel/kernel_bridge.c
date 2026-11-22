@@ -85,6 +85,20 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  * layer can catch it, because xbox_NtReadFile receives a host pointer and a
  * count and cannot know where the mapping ends.
  */
+/* Committed throughout in the RECOMP_EXT_VMA tracker: memory a title reserved
+ * and committed above the mirrors, where a large heap can live. */
+static int bridge_ext_vma_committed(uint32_t va, uint64_t end)
+{
+    uint32_t info[7];
+
+    while (va < end) {
+        if (!guest_vmem_query(va, info) || info[4] != 0x1000u /* MEM_COMMIT */)
+            return 0;
+        va = info[0] + info[3];
+    }
+    return 1;
+}
+
 static int bridge_va_mapped(uint32_t va, uint32_t bytes)
 {
     uint64_t end = (uint64_t)va + bytes;
@@ -94,8 +108,10 @@ static int bridge_va_mapped(uint32_t va, uint32_t bytes)
         return 0;
     if (end <= mapped || xbox_mem2_arena_has(va, bytes))
         return 1;
-    return va >= XBOX_CONTIG_BASE
-        && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;
+    if (va >= XBOX_CONTIG_BASE
+            && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE)
+        return 1;
+    return guest_vmem_active() && bridge_ext_vma_committed(va, end);
 }
 
 /* STATUS_ACCESS_VIOLATION is what NT answers for a user buffer it cannot
