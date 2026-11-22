@@ -710,7 +710,9 @@ VOID __stdcall xbox_RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSectio
         if (--(*rec) == 0) {
             *owner = 0;
             if (InterlockedDecrement(lock) >= 0) {  /* waiters pending */
-                HANDLE sem = xbox_cs_sem(gva, 0);   /* inserted at first wait */
+                /* Created here if need be: a waiter counts itself in before
+                 * it makes the semaphore, and a release in between was lost. */
+                HANDLE sem = xbox_cs_sem(gva, 1);
                 if (sem)
                     ReleaseSemaphore(sem, 1, NULL);
             }
