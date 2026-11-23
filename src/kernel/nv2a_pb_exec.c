@@ -45,6 +45,7 @@
 #include "nv2a_combiner.h"
 #include "nv2a_backend.h"
 #include "nv2a_backend_batch.h"
+#include "nv2a_capture.h"
 #if defined(_WIN32)
 #include <windows.h>
 #define NV_TLS __declspec(thread)
@@ -118,10 +119,20 @@ static int surface_hits_image(uint32_t base, uint32_t bytes)
  * in ordinary RAM (Wreckless renders to the tiled alias of physical
  * 0x01954000) keep the first path and are unaffected.
  */
-static uint32_t dma_resolve(uint32_t offset)
+static int (*s_resolver)(uint32_t offset, uint32_t *va);   /* nv2a_capture.h */
+
+void nv2a_pb_exec_set_resolver(int (*fn)(uint32_t offset, uint32_t *va))
+{
+    s_resolver = fn;
+}
+
+static uint32_t dma_resolve_offset(uint32_t offset)
 {
     extern uint32_t xbox_ContiguousAllocatedBytes(void);
+    uint32_t told;
 
+    if (s_resolver && s_resolver(offset, &told))
+        return told;
     /* Did this runtime hand the offset out as contiguous memory? Then the
      * bytes live in the window, and that is not a guess: the arena is a bump
      * allocator from XBOX_CONTIG_BASE, so everything below its high-water
@@ -143,6 +154,23 @@ static uint32_t dma_resolve(uint32_t offset)
     if ((uint64_t)offset < XBOX_CONTIG_SIZE)
         return XBOX_CONTIG_BASE + offset;
     return offset;                         /* nothing better to offer */
+}
+
+/* Who is saving what the GPU is asked to do (nv2a_capture.h), if anyone. */
+static const Nv2aCaptureHooks *s_capture;
+
+void nv2a_pb_exec_set_capture(const Nv2aCaptureHooks *hooks)
+{
+    s_capture = hooks;
+}
+
+static uint32_t dma_resolve(uint32_t offset)
+{
+    uint32_t va = dma_resolve_offset(offset);
+
+    if (s_capture)
+        s_capture->resolved(offset, va);
+    return va;
 }
 
 static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what)
@@ -3643,29 +3671,30 @@ int nv2a_batch_positions(uint32_t first, uint32_t count, float (*out)[4])
     return 1;
 }
 
-/* Nonzero: the batch back end drew the batch (nv2a_backend_batch.h). */
-static int batch_backend_draw(void)
-{
+/* A batch and everything it points at that is not kept elsewhere. */
+typedef struct {
+    Nv2aRawBatch b;
     Nv2aBatchAttr attrs[NV_VERTEX_ATTRS];
     Nv2aBatchTexture textures[4];
     Nv2aRenderState rs;
     Nv2aTarget target;
-    Nv2aRawBatch b;
-    uint32_t i;
-    int drawn;
+} RawBatch;
 
-    if (!s_batch_backend || !s_batch_backend->draw)
-        return 0;
+static void fill_raw_batch(RawBatch *r, int inline_data)
+{
+    uint32_t i;
+
+    memset(&r->b, 0, sizeof r->b);
     for (i = 0; i < NV_VERTEX_ATTRS; i++) {
-        attrs[i].offset = s_gpu.attr[i].offset;
-        attrs[i].type   = s_gpu.attr[i].type;
-        attrs[i].size   = s_gpu.attr[i].size;
-        attrs[i].stride = s_gpu.attr[i].stride;
-        memcpy(attrs[i].current, s_gpu.imm_attr[i], sizeof attrs[i].current);
+        r->attrs[i].offset = s_gpu.attr[i].offset;
+        r->attrs[i].type   = s_gpu.attr[i].type;
+        r->attrs[i].size   = s_gpu.attr[i].size;
+        r->attrs[i].stride = s_gpu.attr[i].stride;
+        memcpy(r->attrs[i].current, s_gpu.imm_attr[i], sizeof r->attrs[i].current);
     }
     for (i = 0; i < 4; i++) {
         const Texture *t = &s_gpu.texs[i];
-        Nv2aBatchTexture *o = &textures[i];
+        Nv2aBatchTexture *o = &r->textures[i];
 
         o->t.offset = t->offset;
         o->t.width  = t->width;
@@ -3682,29 +3711,39 @@ static int batch_backend_draw(void)
         o->cube         = t->cube;
         o->valid        = t->valid;
     }
-    current_render_state(&rs);
-    current_target(&target);
+    current_render_state(&r->rs);
+    current_target(&r->target);
 
-    memset(&b, 0, sizeof b);
-    b.prim        = s_gpu.prim;
-    b.indices     = s_gpu.idx;
-    b.index_count = s_gpu.idx_count;
-    b.attrs       = attrs;
-    if (s_gpu.inline_active) {
-        b.inline_data  = s_gpu.inline_buf;
-        b.inline_bytes = s_gpu.inline_count * 4;
+    r->b.prim        = s_gpu.prim;
+    r->b.indices     = s_gpu.idx;
+    r->b.index_count = s_gpu.idx_count;
+    r->b.attrs       = r->attrs;
+    if (inline_data) {
+        r->b.inline_data  = s_gpu.inline_buf;
+        r->b.inline_bytes = s_gpu.inline_count * 4;
     }
-    b.transform = batch_transform();
-    b.program   = nv2a_vsh_program_memory(&b.program_start, &b.program_revision);
-    b.constants = nv2a_vsh_constants(&b.constants_revision);
-    b.textures  = textures;
-    b.combiner  = s_gpu.rc_seen ? &s_gpu.rc : NULL;
-    b.state     = &rs;
-    b.target    = &target;
-    b.regs      = s_reg;
+    r->b.transform = batch_transform();
+    r->b.program   = nv2a_vsh_program_memory(&r->b.program_start,
+                                             &r->b.program_revision);
+    r->b.constants = nv2a_vsh_constants(&r->b.constants_revision);
+    r->b.textures  = r->textures;
+    r->b.combiner  = s_gpu.rc_seen ? &s_gpu.rc : NULL;
+    r->b.state     = &r->rs;
+    r->b.target    = &r->target;
+    r->b.regs      = s_reg;
+}
 
+/* Nonzero: the batch back end drew the batch (nv2a_backend_batch.h). */
+static int batch_backend_draw(void)
+{
+    RawBatch r;
+    int drawn;
+
+    if (!s_batch_backend || !s_batch_backend->draw)
+        return 0;
+    fill_raw_batch(&r, s_gpu.inline_active);
     s_batch_handing_over = 1;
-    drawn = s_batch_backend->draw(&b);
+    drawn = s_batch_backend->draw(&r.b);
     s_batch_handing_over = 0;
     if (drawn)
         note_drawn();
@@ -4414,6 +4453,8 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
     }
     if (!on || !s_exec_inited)
         return 0;
+    if (s_capture)
+        s_capture->word(0, method, param);
     s_reg[(method & 0x1FFCu) / 4] = param;
     nv2a_vsh_constant_word(param);
     return 1;
@@ -4421,6 +4462,8 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
 
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 {
+    if (s_capture)
+        s_capture->word(subch, method, param);
     /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
      * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
      * held 0xFF000000 at times, which put the write outside guest memory). */
@@ -4635,6 +4678,11 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
                     s_gpu.clear_color, 10);
+        if (s_capture) {
+            Nv2aTarget target;
+            current_target(&target);
+            s_capture->clear(&target);
+        }
         clear_surface(param);
         if (param & 0x01)                         /* Z */
             zbuf_clear();
@@ -4650,6 +4698,12 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             /* Three ways a batch can have arrived, and only one is in use at
              * a time: vertices completed by SET_VERTEX4F, a payload written
              * with INLINE_ARRAY, or indices into the title's own arrays. */
+            if (s_capture && s_gpu.prim
+                    && (s_gpu.imm_count || s_gpu.inline_count || s_gpu.idx_count)) {
+                RawBatch r;
+                fill_raw_batch(&r, s_gpu.imm_count || s_gpu.inline_count);
+                s_capture->batch(&r.b);
+            }
             if (s_gpu.imm_count)
                 draw_immediate();
             else if (s_gpu.inline_count)
@@ -4832,6 +4886,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             xbox_FlipHoldStall(&s_flip_hold, stall_vbl, stall_ns,
                                clock_ok && !nv2a_pb_scan_in_call());
         }
+        if (s_capture)
+            s_capture->flip();
         return;
     }
 

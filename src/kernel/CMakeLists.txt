@@ -31,6 +31,7 @@ set(KERNEL_SOURCES
     nv2a_flip_hold.c
     nv2a_vsh_interp.c
     nv2a_combiner.c
+    nv2a_capture.c
 )
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
