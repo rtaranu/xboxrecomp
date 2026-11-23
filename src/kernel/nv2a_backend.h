@@ -20,9 +20,9 @@
  * so a back end only ever sees surface pixels. Blend, depth, alpha, cull and
  * stencil state arrive in Nv2aRenderState.
  *
- * ponytail: register-combiner state and texture stages 1-3 are not passed on:
- * a back end sees stage 0 and the diffuse colour. Extend Nv2aBatch when that
- * matters rather than adding callbacks.
+ * Register-combiner state and texture stages 1-3 are not passed on: a back end
+ * sees stage 0 and the diffuse colour. One that needs them, or the batch before
+ * transform, registers an Nv2aBatchBackend too (nv2a_backend_batch.h).
  */
 #ifndef NV2A_BACKEND_H
 #define NV2A_BACKEND_H

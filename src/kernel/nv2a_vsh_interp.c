@@ -43,6 +43,8 @@ static int      s_const_trace = -1;      /* RECOMP_VSH_DUMP: constant traffic */
 /* Changes whenever the program memory or the start slot does, so the decoded
  * copy below knows when to decode again. */
 static uint32_t s_program_revision;
+/* The same for the constants (nv2a_vsh_constants). */
+static uint32_t s_const_revision;
 
 static int vsh_dump_enabled(void)
 {
@@ -95,6 +97,7 @@ void nv2a_vsh_set_constant_load(uint32_t index)
 
 void nv2a_vsh_constant_word(uint32_t word)
 {
+    s_const_revision++;
     if (s_const_load < NV2A_VSH_CONSTANTS)
         memcpy(&s_const[s_const_load][s_const_word], &word, 4);
     else if (vsh_dump_enabled()) {
@@ -119,6 +122,7 @@ void nv2a_vsh_constant_word(uint32_t word)
 
 void nv2a_vsh_set_constant(uint32_t index, const float v[4])
 {
+    s_const_revision++;
     if (index < NV2A_VSH_CONSTANTS)
         memcpy(s_const[index], v, sizeof s_const[index]);
 }
@@ -203,8 +207,23 @@ const float *nv2a_vsh_constant(uint32_t index)
 
 void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word)
 {
+    s_const_revision++;
     if (index < NV2A_VSH_CONSTANTS && comp < 4)
         memcpy(&s_const[index][comp], &word, 4);
+}
+
+const uint32_t (*nv2a_vsh_program_memory(uint32_t *start_slot,
+                                         uint32_t *revision))[4]
+{
+    *start_slot = s_start_slot;
+    *revision = s_program_revision;
+    return (const uint32_t (*)[4])s_program;
+}
+
+const float (*nv2a_vsh_constants(uint32_t *revision))[4]
+{
+    *revision = s_const_revision;
+    return (const float (*)[4])s_const;
 }
 
 /* ---- execution ----------------------------------------------------------- */
@@ -569,8 +588,10 @@ static int vsh_run_decoded(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *ou
         if (d->omask) {
             const vec4 *src = d->from_ilu ? &ires : &mres;
             if (!d->to_o) {                               /* to c[] */
-                if (s_cxt_write && d->oaddr < NV2A_VSH_CONSTANTS)
+                if (s_cxt_write && d->oaddr < NV2A_VSH_CONSTANTS) {
+                    s_const_revision++;
                     write_masked(s_const[d->oaddr], src, d->omask);
+                }
             } else if (d->oaddr == 0) {
                 write_masked(regs[12].v, src, d->omask);
             } else if (d->oaddr < 13) {
@@ -692,8 +713,10 @@ static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out
         if (omask) {
             const vec4 *src = field(ins, 3, 2, 1) ? &ires : &mres;
             if (!field(ins, 3, 11, 1)) {                  /* to c[] */
-                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS)
+                if (s_cxt_write && oaddr < NV2A_VSH_CONSTANTS) {
+                    s_const_revision++;
                     write_masked(s_const[oaddr], src, omask);
+                }
             } else if (oaddr == 0) {
                 write_masked(opos.v, src, omask);
             } else if (oaddr < 13) {

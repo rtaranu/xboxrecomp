@@ -44,6 +44,7 @@
 #include "nv2a_vsh_interp.h"
 #include "nv2a_combiner.h"
 #include "nv2a_backend.h"
+#include "nv2a_backend_batch.h"
 #if defined(_WIN32)
 #include <windows.h>
 #define NV_TLS __declspec(thread)
@@ -792,6 +793,25 @@ void nv2a_backend_register(const Nv2aBackend *backend)
     nv2a_backend_register_with_present_sync(backend, NULL);
 }
 
+/* The optional back end that takes batches before transform
+ * (nv2a_backend_batch.h). */
+static const Nv2aBatchBackend *s_batch_backend;
+
+int nv2a_backend_register_batches(const Nv2aBatchBackend *backend)
+{
+    if (backend && backend->version != NV2A_BATCH_VERSION)
+        return 0;
+    s_batch_backend = backend;
+    return 1;
+}
+
+/* The fewest vertices worth drawing: the triangle paths need three, a batch
+ * back end is handed points and lines as well. */
+static uint32_t min_batch_vertices(void)
+{
+    return s_batch_backend && s_batch_backend->draw ? 1 : 3;
+}
+
 static int backend_draws(void)
 {
     return s_backend && s_backend->draw;
@@ -839,6 +859,46 @@ static void current_render_state(Nv2aRenderState *r)
     r->stencil_fail      = s_reg[0x0370 / 4];        /* SET_STENCIL_OP_FAIL */
     r->stencil_zfail     = s_reg[0x0374 / 4];        /* SET_STENCIL_OP_ZFAIL */
     r->stencil_zpass     = s_reg[0x0378 / 4];        /* SET_STENCIL_OP_ZPASS */
+}
+
+static void current_target(Nv2aTarget *t)
+{
+    memset(t, 0, sizeof *t);
+    t->color_va        = s_gpu.color_offset ? dma_resolve(s_gpu.color_offset) : 0;
+    t->zeta_va         = s_gpu.zeta_offset ? dma_resolve(s_gpu.zeta_offset) : 0;
+    t->color_pitch     = s_gpu.pitch;
+    t->zeta_pitch      = s_reg[0x020C / 4] >> 16;    /* SET_SURFACE_PITCH */
+    t->format          = s_gpu.format;
+    t->bytes_per_pixel = surface_bpp();
+    t->clip_x          = s_gpu.clip_x;
+    t->clip_y          = s_gpu.clip_y;
+    t->clip_w          = s_gpu.clip_w;
+    t->clip_h          = s_gpu.clip_h;
+    t->aa_sx           = s_gpu.aa_sx > 1.5f ? 2 : 1;
+    t->aa_sy           = s_gpu.aa_sy > 1.5f ? 2 : 1;
+}
+
+/* Nonzero: the batch back end cleared the surface. */
+static int batch_backend_clear(uint32_t flags)
+{
+    Nv2aTarget target;
+    Nv2aRenderState rs;
+    Nv2aRawClear c;
+
+    if (!s_batch_backend || !s_batch_backend->clear)
+        return 0;
+    current_target(&target);
+    current_render_state(&rs);
+    c.flags    = flags;
+    c.argb     = s_gpu.clear_color;
+    c.zstencil = s_gpu.zstencil_clear;
+    c.rect_set = (s_gpu.clear_rect_set & 3) == 3;
+    c.rect_h   = s_gpu.clear_rect_h;
+    c.rect_v   = s_gpu.clear_rect_v;
+    if (!s_batch_backend->clear(&target, &rs, &c))
+        return 0;
+    s_gpu.clears++;
+    return 1;
 }
 
 static int sample_texture(uint32_t u, uint32_t v, uint32_t *argb);
@@ -896,12 +956,53 @@ static void surface_swizzle_update(void)
                            &s_swz_mx, &s_swz_my);
 }
 
+/* A surface was cleared: the window shows it until the title flips. */
+static void show_cleared_surface(void)
+{
+    /* Show the surface actually being drawn into. A title that double-buffers
+     * renders into the back buffer, so following AvSetDisplayMode's address
+     * would show the one nothing is writing. */
+    /* The window has to read where the pixels actually are, which is the
+     * resolved address rather than the DMA-object offset. */
+    /* Only until the title flips. Following the draw surface on every scan
+     * shows the buffer being written right now, half a frame at a time; past
+     * the first flip the window is repointed at the finished one instead. */
+    if (s_gpu.flips == 0) {
+        xbox_FramebufferWindowSet(dma_resolve(s_gpu.color_offset), s_gpu.pitch);
+        xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
+    }
+
+    /* And open the window, rather than waiting for AvSetDisplayMode to do it.
+     *
+     * That was the only caller, so a title which draws before setting a display
+     * mode -- or never sets one at all -- got no window however much it
+     * rendered. The Xbox Dashboard clears a 1280x960 surface at 0x00088000 on
+     * its first frame and had not called AvSetDisplayMode by then, so
+     * RECOMP_FB_WINDOW=1 was set, the executor knew the address and the pitch,
+     * and nothing appeared.
+     *
+     * Here is the better trigger anyway: this runs when a surface address is
+     * known to be real, because a clear just used it. Idempotent and gated on
+     * RECOMP_FB_WINDOW, so the cost is one interlocked compare per clear. */
+    xbox_FramebufferWindowStart();
+}
+
 static void clear_surface(uint32_t param)
 {
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
     uint32_t bpp = surface_bpp();
     uint32_t y, x;
 
+    if (batch_backend_clear(param)) {
+        /* As for a clear drawn here: the surface counts as drawn into, so a
+         * frame that only clears and is written by the title still flips it. */
+        if (param & NV097_CLEAR_COLOR_MASK) {
+            if (((s_gpu.format >> 8) & 0xF) != 2)
+                note_drawn();
+            show_cleared_surface();
+        }
+        return;
+    }
     /* A back end clears colour and/or depth/stencil itself (flags are the
      * CLEAR_SURFACE bits: Z 0x1, stencil 0x2, colour 0xF0). */
     if (s_backend && s_backend->clear) {
@@ -1039,32 +1140,7 @@ static void clear_surface(uint32_t param)
         }
     }
 
-    /* Show the surface actually being drawn into. A title that double-buffers
-     * renders into the back buffer, so following AvSetDisplayMode's address
-     * would show the one nothing is writing. */
-    /* The window has to read where the pixels actually are, which is the
-     * resolved address rather than the DMA-object offset. */
-    /* Only until the title flips. Following the draw surface on every scan
-     * shows the buffer being written right now, half a frame at a time; past
-     * the first flip the window is repointed at the finished one instead. */
-    if (s_gpu.flips == 0) {
-        xbox_FramebufferWindowSet(dma_resolve(s_gpu.color_offset), s_gpu.pitch);
-        xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
-    }
-
-    /* And open the window, rather than waiting for AvSetDisplayMode to do it.
-     *
-     * That was the only caller, so a title which draws before setting a display
-     * mode -- or never sets one at all -- got no window however much it
-     * rendered. The Xbox Dashboard clears a 1280x960 surface at 0x00088000 on
-     * its first frame and had not called AvSetDisplayMode by then, so
-     * RECOMP_FB_WINDOW=1 was set, the executor knew the address and the pitch,
-     * and nothing appeared.
-     *
-     * Here is the better trigger anyway: this runs when a surface address is
-     * known to be real, because a clear just used it. Idempotent and gated on
-     * RECOMP_FB_WINDOW, so the cost is one interlocked compare per clear. */
-    xbox_FramebufferWindowStart();
+    show_cleared_surface();
 }
 
 
@@ -3481,12 +3557,128 @@ static void raster_batch_program(void)
         backend_flush(!s_xf_no_tex);
 }
 
+static Nv2aTransform batch_transform(void)
+{
+    if (batch_uses_program())
+        return NV2A_TRANSFORM_PROGRAM;
+    return batch_is_ffp() ? NV2A_TRANSFORM_FIXED : NV2A_TRANSFORM_NONE;
+}
+
+/* Only while a batch is being handed over: outside it the index list and the
+ * attribute table are not that batch's. */
+static int s_batch_handing_over;
+
+int nv2a_batch_transform(uint32_t first, uint32_t count, Nv2aVshOutput *out)
+{
+    Nv2aTransform how = batch_transform();
+    uint32_t i, k, st;
+
+    if (!s_batch_handing_over || first > s_gpu.idx_count
+        || count > s_gpu.idx_count - first)
+        return 0;
+    for (i = 0; i < count; i++) {
+        uint32_t index = s_gpu.idx[first + i];
+        Nv2aVshOutput *o = &out[i];
+        float c[4];
+
+        if (how != NV2A_TRANSFORM_NONE) {
+            if (!transform_vertex(index, o))
+                return 0;
+            continue;
+        }
+        memset(o, 0, sizeof *o);
+        if (!fetch_attr(&s_gpu.attr[0], index, o->pos))
+            return 0;
+        o->pos[0] *= aa_scale_x();
+        o->pos[1] *= aa_scale_y();
+        o->pos[3] = 1.0f;
+        if (!fetch_attr(color_attr(), index, c))
+            c[0] = c[1] = c[2] = c[3] = 1.0f;
+        for (k = 0; k < 4; k++)
+            o->d0[k] = c[k];
+        fetch_attr(texcoord_attr(), index, o->tex[0]);
+        for (st = 1; st < 4; st++)
+            fetch_attr(&s_gpu.attr[9 + st], index, o->tex[st]);
+    }
+    return 1;
+}
+
+/* Nonzero: the batch back end drew the batch (nv2a_backend_batch.h). */
+static int batch_backend_draw(void)
+{
+    Nv2aBatchAttr attrs[NV_VERTEX_ATTRS];
+    Nv2aBatchTexture textures[4];
+    Nv2aRenderState rs;
+    Nv2aTarget target;
+    Nv2aRawBatch b;
+    uint32_t i;
+    int drawn;
+
+    if (!s_batch_backend || !s_batch_backend->draw)
+        return 0;
+    for (i = 0; i < NV_VERTEX_ATTRS; i++) {
+        attrs[i].offset = s_gpu.attr[i].offset;
+        attrs[i].type   = s_gpu.attr[i].type;
+        attrs[i].size   = s_gpu.attr[i].size;
+        attrs[i].stride = s_gpu.attr[i].stride;
+        memcpy(attrs[i].current, s_gpu.imm_attr[i], sizeof attrs[i].current);
+    }
+    for (i = 0; i < 4; i++) {
+        const Texture *t = &s_gpu.texs[i];
+        Nv2aBatchTexture *o = &textures[i];
+
+        o->t.offset = t->offset;
+        o->t.width  = t->width;
+        o->t.height = t->height;
+        o->t.pitch  = t->pitch;
+        o->t.color  = t->color;
+        o->t.addr_u = t->addr_u;
+        o->t.addr_v = t->addr_v;
+        o->t.levels = tex_size_from_format(t->color) ? t->levels : 1;
+        o->t.filter = t->filter;
+        o->palette      = t->palette;
+        o->border       = t->border;
+        o->border_color = t->border_color;
+        o->cube         = t->cube;
+        o->valid        = t->valid;
+    }
+    current_render_state(&rs);
+    current_target(&target);
+
+    memset(&b, 0, sizeof b);
+    b.prim        = s_gpu.prim;
+    b.indices     = s_gpu.idx;
+    b.index_count = s_gpu.idx_count;
+    b.attrs       = attrs;
+    if (s_gpu.inline_active) {
+        b.inline_data  = s_gpu.inline_buf;
+        b.inline_bytes = s_gpu.inline_count * 4;
+    }
+    b.transform = batch_transform();
+    b.program   = nv2a_vsh_program_memory(&b.program_start, &b.program_revision);
+    b.constants = nv2a_vsh_constants(&b.constants_revision);
+    b.textures  = textures;
+    b.combiner  = s_gpu.rc_seen ? &s_gpu.rc : NULL;
+    b.state     = &rs;
+    b.target    = &target;
+    b.regs      = s_reg;
+
+    s_batch_handing_over = 1;
+    drawn = s_batch_backend->draw(&b);
+    s_batch_handing_over = 0;
+    if (drawn)
+        note_drawn();
+    return drawn;
+}
+
 static void raster_batch(void)
 {
     uint32_t i;
     uint32_t before = s_gpu.tris_drawn;
     int textured = 0;
 
+    if (batch_backend_draw())
+        return;
     if (s_gpu.idx_count < 3)
         return;
     if (batch_uses_program() || batch_is_ffp()) {
@@ -3829,7 +4021,7 @@ static void draw_inline_array(void)
         goto out;
 
     count = (s_gpu.inline_count * 4) / vsize;
-    if (count < 3 || count > NV_MAX_INDICES)
+    if (count < min_batch_vertices() || count > NV_MAX_INDICES)
         goto out;
     for (a = 0; a < NV_VERTEX_ATTRS; a++)
         if (s_gpu.attr[a].size)
@@ -3867,7 +4059,7 @@ static void draw_immediate(void)
     VertexAttr saved[NV_VERTEX_ATTRS];
     uint32_t i;
 
-    if (s_gpu.imm_count < 3)
+    if (s_gpu.imm_count < min_batch_vertices())
         return;
 
     memcpy(saved, s_gpu.attr, sizeof saved);

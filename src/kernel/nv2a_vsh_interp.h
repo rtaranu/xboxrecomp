@@ -58,4 +58,10 @@ const float *nv2a_vsh_constant(uint32_t index);   /* for traces */
 void nv2a_vsh_constant_component(uint32_t index, uint32_t comp, uint32_t word);
 void nv2a_vsh_set_instruction(uint32_t slot, const uint32_t words[4]);
 
+/* Program memory and the constants, whole, for a renderer that runs the
+ * program itself. A revision changes whenever the contents may have. */
+const uint32_t (*nv2a_vsh_program_memory(uint32_t *start_slot,
+                                         uint32_t *revision))[4];
+const float (*nv2a_vsh_constants(uint32_t *revision))[4];
+
 #endif

@@ -1,22 +1,24 @@
 /* A frame that only clears its surface (then CPU-blits into it, as a video
- * player does) presents that surface at the flip, not the last one drawn. */
+ * player does) presents that surface at the flip, not the last one drawn:
+ * also when a batch back end does the clearing. */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
-#include "nv2a_backend.h"
+#include "nv2a_backend_batch.h"
 
 #define MEM_BYTES 0x10000u
 #define FB_A 0x8000u
 #define FB_B 0x9000u
+#define FB_C 0xA000u
 #define CLEAR_PIXEL 0xFF102030u
 
 static uint32_t s_memory[MEM_BYTES / sizeof(uint32_t)];
 static uint8_t *const s_mem = (uint8_t *)s_memory;
 static int s_fail;
 static uint32_t s_presented_va, s_presented_pixel;
-static unsigned s_present_count;
+static unsigned s_present_count, s_windows;
 
 #define CHECK(c) do { if (!(c)) { \
     fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; \
@@ -30,7 +32,7 @@ void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pi
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
 uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
-void xbox_FramebufferWindowStart(void) {}
+void xbox_FramebufferWindowStart(void) { s_windows++; }
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
@@ -54,6 +56,16 @@ static void draw_surface(const Nv2aSurface *s, const Nv2aBatch *batch)
 }
 /* Draws only: clears stay on the executor's own path. */
 static const Nv2aBackend s_backend = {NULL, draw_surface, NULL};
+
+/* Clears only, its pixels put into memory as a host renderer's copy would. */
+static int batch_clear(const Nv2aTarget *t, const Nv2aRenderState *rs, const Nv2aRawClear *c)
+{
+    (void)rs;
+    if (c->flags & 0xF0)
+        memcpy(s_mem + t->color_va, &c->argb, 4);
+    return 1;
+}
+static const Nv2aBatchBackend s_batches = {NV2A_BATCH_VERSION, NULL, batch_clear};
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
 static void method(uint32_t number, uint32_t value) { nv2a_pb_exec_method(0, number, value); }
@@ -94,6 +106,23 @@ int main(void)
     CHECK(s_present_count == 2 && s_presented_va == FB_B);
     CHECK(s_presented_pixel == CLEAR_PIXEL);
 
+    /* Frame 3 clears C through the batch back end; frame 4 only A's depth,
+     * which shows nothing new. */
+    nv2a_backend_register_batches(&s_batches);
+    s_windows = 0;
+    method(0x0210, FB_C);
+    method(0x1D94, 0xF0);
+    CHECK(s_windows == 1);
+    method(0x0130, 0);
+    CHECK(s_present_count == 3 && s_presented_va == FB_C);
+    CHECK(s_presented_pixel == CLEAR_PIXEL);
+    method(0x0210, FB_A);
+    method(0x1D94, 0x03);
+    CHECK(s_windows == 1);
+    method(0x0130, 0);
+    CHECK(s_presented_va == FB_C);
+
+    nv2a_backend_register_batches(NULL);
     nv2a_backend_register(NULL);
     if (!s_fail)
         puts("NV2A clear-only frame: ok");
