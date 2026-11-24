@@ -121,6 +121,7 @@ int xbox_Nv2aPgraphWaitAck(uint32_t timeout_ms) { (void)timeout_ms; return 1; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
 extern void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param);
+extern int nv2a_pb_exec_run(uint32_t method, const uint32_t *p, uint32_t n);
 extern int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param);
 
 /* ---- how far to go ------------------------------------------------------ */
@@ -243,6 +244,20 @@ static double now_ms(void)
 #endif
 }
 
+/* The words from here on that are for this method, as the walker finds them. */
+static uint32_t run(size_t at, uint32_t method, uint32_t *p, uint32_t most, size_t *next)
+{
+    uint32_t n = 0;
+
+    while (n < most && at + 16 <= s_size && u32(at) == NV2A_CAPTURE_WORD && u32(at + 4) == 0
+           && u32(at + 8) == method) {
+        p[n++] = u32(at + 12);
+        at += 16;
+    }
+    *next = at;
+    return n;
+}
+
 /* One pass over the file. Returns the milliseconds its commands took, the
  * ones that only set the state up excluded. */
 static double play(uint32_t *words)
@@ -255,6 +270,15 @@ static double play(uint32_t *words)
     for (at = 8; (type = record(at, &next)) != 0; at = next) {
         if (type == NV2A_CAPTURE_WORD) {
             uint32_t subch = u32(at + 4), method = u32(at + 8), param = u32(at + 12);
+            uint32_t p[128], n;
+            size_t after;
+
+            if (subch == 0 && (method == 0x1800 || method == 0x1808 || method == 0x1818)
+                && (n = run(at, method, p, 128, &after)) > 1 && nv2a_pb_exec_run(method, p, n)) {
+                next = after;
+                *words += n;
+                continue;
+            }
             if (!(subch == 0 && method >= 0x0B80u && method < 0x0C00u
                   && nv2a_pb_exec_constant_word(method, param)))
                 nv2a_pb_exec_method(subch, method, param);
