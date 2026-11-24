@@ -37,6 +37,9 @@ static uint32_t s_first;                /* the first since timing started */
 static uint64_t s_frame_ns, s_phase_ns; /* when each began */
 static uint64_t s_spent[NV2A_PERF_PHASES];
 static float s_gpu;                     /* known already of the open frame */
+static uint32_t s_shown[KEPT];          /* frames, by number, locked as above, */
+static float s_shown_ms[KEPT];          /* that were shown, so long after one */
+static uint64_t s_shown_ns;             /* the last was; its thread's */
 static volatile int s_want;             /* nv2a_perf_set() */
 static double s_log_ms;                 /* a line every so many; 0: none */
 static double s_logged_ms;              /* since the last */
@@ -138,13 +141,18 @@ static void log_line(void)
     fprintf(stderr, "[PERF] %.1f fps over %.1f s: %.2f ms [%.2f %.2f], jitter %.2f, %u over"
             " 1.5 x %.2f; work %.2f: commands %.2f, draws %.2f, vertices %.2f, textures %.2f;"
             " once only: pipelines %.2f, new textures %.2f, worst %.2f, %u frames over 1 ms;"
-            " waits: title %.2f, flip hold %.2f, gpu %.2f, copying back %.2f; gpu %.2f\n",
+            " waits: title %.2f, flip hold %.2f, gpu %.2f, copying back %.2f; gpu %.2f",
             1000.0 / s.avg, s.ms / 1000.0, s.avg, s.lo, s.hi, s.jitter, s.hitches, s.target,
             s.phase[NV2A_PERF_WORK], s.part[NV2A_PERF_COMMANDS], s.part[NV2A_PERF_DRAWS],
             s.part[NV2A_PERF_VERTICES], s.part[NV2A_PERF_TEXTURES],
             s.phase[NV2A_PERF_PIPELINES], s.phase[NV2A_PERF_NEW_TEXTURES], s.once_worst,
             s.once_frames, s.phase[NV2A_PERF_TITLE], s.phase[NV2A_PERF_HOLD],
             s.phase[NV2A_PERF_GPU], s.phase[NV2A_PERF_BACK], s.gpu);
+    if (s.shown.n)
+        fprintf(stderr, "; shown: %.2f ms [%.2f %.2f], jitter %.2f, %u over 1.5 x %.2f,"
+                " %u skipped", s.shown.avg, s.shown.lo, s.shown.hi, s.shown.jitter,
+                s.shown.hitches, s.shown.target, s.skipped);
+    fprintf(stderr, "\n");
 }
 
 void nv2a_perf_frame(void)
@@ -169,6 +177,7 @@ void nv2a_perf_frame(void)
         sampling = 1;
         lock();
         s_first = s_count;
+        s_shown[s_count % KEPT] = 0;    /* of the frame that was left open */
         unlock();
         s_logged_ms = 0.0;
         s_phase_ns = xbox_HostNowNs();
@@ -209,6 +218,24 @@ void nv2a_perf_gpu(uint32_t frame, double ms)
     unlock();
 }
 
+void nv2a_perf_shown(uint32_t frame)
+{
+    uint64_t now;
+
+    if (!frame) {
+        s_shown_ns = 0;
+        return;
+    }
+    now = xbox_HostNowNs();
+    if (s_shown_ns) {
+        lock();
+        s_shown[(frame - 1) % KEPT] = frame;
+        s_shown_ms[(frame - 1) % KEPT] = (float)((double)(now - s_shown_ns) / 1e6);
+        unlock();
+    }
+    s_shown_ns = now;
+}
+
 static int by_size(const void *a, const void *b)
 {
     float x = *(const float *)a, y = *(const float *)b;
@@ -228,8 +255,12 @@ uint32_t nv2a_perf_frames(Nv2aPerfFrame *out, uint32_t room)
         n = KEPT;
     if (n > room)
         n = room;
-    for (i = 0; i < n; i++)
-        out[i] = s_rec[(s_count - n + i) % KEPT];
+    for (i = 0; i < n; i++) {
+        uint32_t k = (s_count - n + i) % KEPT;
+
+        out[i] = s_rec[k];
+        out[i].shown = s_shown[k] == s_count - n + i + 1 ? s_shown_ms[k] : -1.0f;
+    }
     unlock();
     return n;
 }
@@ -241,12 +272,41 @@ void nv2a_perf_stats(double ms, Nv2aPerfStats *out)
     nv2a_perf_sum(f, nv2a_perf_frames(f, KEPT), ms, out);
 }
 
+/* Of `n` times, the latest first, at least one; left in order of size. */
+static void pace(float *t, uint32_t n, Nv2aPerfPace *out)
+{
+    double sum = 0.0, step = 0.0;
+    uint32_t i;
+
+    out->n = n;
+    out->lo = out->hi = t[0];
+    for (i = 0; i < n; i++) {
+        sum += t[i];
+        if (t[i] < out->lo)
+            out->lo = t[i];
+        if (t[i] > out->hi)
+            out->hi = t[i];
+        if (i)
+            step += t[i] > t[i - 1] ? t[i] - t[i - 1] : t[i - 1] - t[i];
+    }
+    out->avg = sum / n;
+    out->jitter = n > 1 ? step / (n - 1) : 0.0;
+    qsort(t, n, sizeof t[0], by_size);
+    out->target = t[n / 2];
+    if (out->target > VBLANK_MS * 0.75)
+        out->target = VBLANK_MS * (double)(uint32_t)(out->target / VBLANK_MS + 0.5);
+    out->hitches = 0;
+    for (i = 0; i < n; i++)
+        out->hitches += t[i] >= out->target * 1.5;
+}
+
 void nv2a_perf_sum(const Nv2aPerfFrame *f, uint32_t have, double ms, Nv2aPerfStats *out)
 {
-    float sorted[KEPT];
-    uint32_t n = 0, i;
+    float took[KEPT], shown[KEPT];
+    uint32_t n = 0, seen = 0, unseen = 0;
     uint32_t part[NV2A_PERF_PARTS] = {0};
-    double step = 0.0, gpu = 0.0;
+    Nv2aPerfPace all;
+    double gpu = 0.0;
     int k;
 
     memset(out, 0, sizeof *out);
@@ -256,13 +316,14 @@ void nv2a_perf_sum(const Nv2aPerfFrame *f, uint32_t have, double ms, Nv2aPerfSta
         const Nv2aPerfFrame *r = &f[have - 1 - n];
         double once = r->phase[NV2A_PERF_PIPELINES] + r->phase[NV2A_PERF_NEW_TEXTURES];
 
-        if (!n || r->ms < out->lo)
-            out->lo = r->ms;
-        if (r->ms > out->hi)
-            out->hi = r->ms;
-        if (n)
-            step += r->ms > sorted[n - 1] ? r->ms - sorted[n - 1] : sorted[n - 1] - r->ms;
-        sorted[n++] = r->ms;
+        took[n++] = r->ms;
+        if (r->shown >= 0.0f) {
+            out->skipped += unseen;
+            unseen = 0;
+            shown[seen++] = r->shown;
+        } else if (seen) {              /* not those still to be */
+            unseen++;
+        }
         out->ms += r->ms;
         for (k = 0; k < NV2A_PERF_PHASES; k++)
             out->phase[k] += r->phase[k];
@@ -283,17 +344,18 @@ void nv2a_perf_sum(const Nv2aPerfFrame *f, uint32_t have, double ms, Nv2aPerfSta
         return;
     }
     out->frames = n;
-    out->avg = out->ms / n;
-    out->jitter = n > 1 ? step / (n - 1) : 0.0;
+    pace(took, n, &all);
+    out->avg = all.avg;
+    out->lo = all.lo;
+    out->hi = all.hi;
+    out->jitter = all.jitter;
+    out->target = all.target;
+    out->hitches = all.hitches;
+    if (seen)
+        pace(shown, seen, &out->shown);
     for (k = 0; k < NV2A_PERF_PHASES; k++)
         out->phase[k] /= n;
     for (k = 0; k < NV2A_PERF_PARTS && out->samples; k++)
         out->part[k] = out->phase[NV2A_PERF_WORK] * part[k] / out->samples;
     out->gpu = out->gpu_frames ? gpu / out->gpu_frames : 0.0;
-    qsort(sorted, n, sizeof sorted[0], by_size);
-    out->target = sorted[n / 2];
-    if (out->target > VBLANK_MS * 0.75)
-        out->target = VBLANK_MS * (double)(uint32_t)(out->target / VBLANK_MS + 0.5);
-    for (i = 0; i < n; i++)
-        out->hitches += sorted[i] >= out->target * 1.5;
 }

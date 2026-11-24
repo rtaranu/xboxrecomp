@@ -73,6 +73,10 @@ uint32_t nv2a_perf_frame_open(void);
 /* GPU time of a frame, once known, on that thread; it adds up. */
 void nv2a_perf_gpu(uint32_t frame, double ms);
 
+/* A picture is in the window: that of the frame that was open at its flip, 0
+ * if none. For presenters that know; one thread. */
+void nv2a_perf_shown(uint32_t frame);
+
 /* On or off, from the next flip; the log keeps it on. Any thread. */
 void nv2a_perf_set(int on);
 
@@ -82,6 +86,8 @@ void nv2a_perf_sample(void);
 typedef struct {
     float ms, phase[NV2A_PERF_PHASES];
     float gpu;                          /* below 0: not known yet */
+    float shown;                        /* since the picture before it; below 0:
+                                         * not shown, or not known */
     uint32_t part[NV2A_PERF_PARTS];     /* samples */
 } Nv2aPerfFrame;
 
@@ -89,6 +95,13 @@ typedef struct {
  * them. Returns how many. Any thread. */
 #define NV2A_PERF_KEPT 2048u
 uint32_t nv2a_perf_frames(Nv2aPerfFrame *out, uint32_t room);
+
+/* Times between pictures. */
+typedef struct {
+    uint32_t n;                 /* 0: nothing below is set */
+    double avg, lo, hi, jitter, target;         /* as below */
+    uint32_t hitches;
+} Nv2aPerfPace;
 
 typedef struct {
     uint32_t frames;            /* 0: none yet, and nothing below is set */
@@ -104,6 +117,8 @@ typedef struct {
     uint32_t gpu_frames;        /* it is known for */
     double once_worst;          /* the most once-only work in a frame, ms */
     uint32_t once_frames;       /* with over 1 ms of it */
+    Nv2aPerfPace shown;         /* in the window, where that is known */
+    uint32_t skipped;           /* frames between those that were not shown */
 } Nv2aPerfStats;
 
 /* Over the latest of these that took `ms` together. Any thread. */

@@ -233,6 +233,82 @@ static void test_pace(void)
     CHECK(stats(1e9).gpu_frames == 1 && near_to(stats(1e9).gpu, 1.0));
 }
 
+/* A flip, and its picture in the window so long after the one before. */
+static void shown(double flip, double ms)
+{
+    static uint64_t last;
+    uint32_t id = nv2a_perf_frame_open();
+    uint64_t now;
+
+    frame(flip);
+    now = s_now;
+    s_now = last += (uint64_t)(ms * 1e6 + 0.5);
+    nv2a_perf_shown(id);
+    s_now = now;
+}
+
+static void test_shown(void)
+{
+    Nv2aPerfStats s;
+    Nv2aPerfFrame f[8];
+    uint32_t id;
+    int i;
+
+    nv2a_perf_set(0);
+    frame(1.0);
+    nv2a_perf_set(1);
+    frame(1.0);
+    for (i = 0; i < 4; i++)
+        frame(10.0);
+    s = stats(1000);
+    CHECK(s.shown.n == 0 && s.skipped == 0);            /* nobody says */
+    nv2a_perf_shown(0);
+    shown(3.0, 1000.0);                                 /* since nothing known */
+    CHECK(stats(1000).shown.n == 0);
+    for (i = 0; i < 20; i++)                            /* uneven flips, shown evenly */
+        shown(i & 1 ? 3.0 : 30.0, i & 1 ? 16.0 : 17.0);
+    shown(16.0, 33.0);
+    s = stats(1e9);
+    CHECK(s.shown.n == 21 && s.skipped == 0 && s.shown.hitches == 1);
+    CHECK(near_to(s.shown.lo, 16) && near_to(s.shown.hi, 33));
+    CHECK(near_to(s.shown.avg, 363.0 / 21) && near_to(s.shown.target, 1000.0 / 60));
+    CHECK(near_to(s.shown.jitter, (19 + 17.0) / 20));
+    CHECK(s.hitches == 11 && near_to(s.lo, 3) && near_to(s.hi, 30));    /* the flips' */
+
+    /* Not shown: between others they are skipped, at the end still to come. */
+    frame(10.0);
+    frame(10.0);
+    id = nv2a_perf_frame_open();
+    nv2a_perf_shown(id);                                /* before the frame is over */
+    frame(10.0);
+    frame(10.0);
+    s = stats(1e9);
+    CHECK(s.shown.n == 22 && s.skipped == 2);
+    CHECK(nv2a_perf_frames(f, 8) == 8);
+    CHECK(f[7].shown < 0 && f[6].shown >= 0 && f[5].shown < 0 && f[4].shown < 0);
+    CHECK(near_to(f[3].shown, 33) && near_to(f[2].shown, 16));
+
+    /* Nor is one that was left open when the timing ended. */
+    nv2a_perf_shown(nv2a_perf_frame_open());
+    nv2a_perf_set(0);
+    frame(1.0);
+    nv2a_perf_set(1);
+    frame(1.0);
+    nv2a_perf_shown(0);
+    shown(5.0, 5.0);
+    shown(5.0, 5.0);
+    CHECK(stats(1e9).frames == 2 && stats(1e9).shown.n == 1);
+
+    /* Others of its place are not taken for it. */
+    for (i = 0; i < 2048; i++)
+        frame(1.0);
+    CHECK(stats(1e9).shown.n == 0);
+    nv2a_perf_shown(0);
+    nv2a_perf_shown(nv2a_perf_frame_open());
+    frame(1.0);
+    CHECK(stats(1e9).shown.n == 0);
+}
+
 /* RECOMP_PERF_LOG: timed whether or not anything else asks. */
 static int test_log(void)
 {
@@ -255,6 +331,7 @@ int main(int argc, char **argv)
     test_parts();
     test_gpu();
     test_pace();
+    test_shown();
     printf("%s\n", s_bad ? "failed" : "passed");
     return s_bad != 0;
 }
