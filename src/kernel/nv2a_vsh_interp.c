@@ -371,9 +371,13 @@ static void vsh_finish(Nv2aVshOutput *out, const vec4 *opos,
      * unclamped every lit model came out washed out. */
     for (int k = 0; k < 4; k++) {
         float c0 = outregs[3][k], c1 = outregs[4][k];
+        float b0 = outregs[7][k], b1 = outregs[8][k];
         out->d0[k] = c0 > 1.0f ? 1.0f : (c0 >= 0.0f ? c0 : 0.0f);
         out->d1[k] = c1 > 1.0f ? 1.0f : (c1 >= 0.0f ? c1 : 0.0f);
+        out->b0[k] = b0 > 1.0f ? 1.0f : (b0 >= 0.0f ? b0 : 0.0f);
+        out->b1[k] = b1 > 1.0f ? 1.0f : (b1 >= 0.0f ? b1 : 0.0f);
     }
+    memcpy(out->point_size, outregs[6], sizeof out->point_size);
     memcpy(out->fog, outregs[5], sizeof out->fog);
     memcpy(out->tex[0], outregs[9], sizeof out->tex[0]);
     memcpy(out->tex[1], outregs[10], sizeof out->tex[1]);
@@ -387,6 +391,7 @@ static void vsh_init_regs(vec4 temp[12], vec4 *opos, float outregs[13][4])
     memset(opos, 0, sizeof *opos);
     memset(outregs, 0, 13 * sizeof *outregs);
     outregs[3][3] = outregs[4][3] = 1.0f;      /* colours default opaque */
+    outregs[7][3] = outregs[8][3] = 1.0f;      /* a back face's too */
     /* Unwritten texture coordinates are (0,0,0,1), as xemu initialises them:
      * a projective stage divides by q, and q = 0 would put every texel of an
      * unwritten stage at infinity. */

@@ -35,6 +35,8 @@ typedef struct {
     float d0[4], d1[4];
     float fog[4];
     float tex[4][4];
+    float b0[4], b1[4];                 /* the colours of a back face */
+    float point_size[4];                /* x */
 } Nv2aVshOutput;
 
 void nv2a_vsh_set_load_slot(uint32_t slot);           /* _PROGRAM_LOAD      */

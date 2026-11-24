@@ -2046,7 +2046,7 @@ static int batch_is_ffp(void)
  *
  * ponytail: normals go through the model-view matrix itself rather than the
  * inverse transpose (exact for rotations and uniform scale), no specular, no
- * spot cones, no back-face colours, no skinning. Add them when a mesh looks
+ * spot cones, no skinning. Add them when a mesh looks
  * wrong rather than dark. */
 #define NV_LIGHTS 8
 
@@ -2077,7 +2077,9 @@ static int ffp_flip_normals(void)
     return on;
 }
 
-static int lit_color(uint32_t index, float out[4])
+/* back: what a back face shows, with SET_LIGHT_TWO_SIDE_EN: the normal turned
+ * round and the back colours of the lights and the material. */
+static int lit_color(uint32_t index, int back, float out[4])
 {
     const float *mv = (const float *)&s_reg[0x0480 / 4];
     float pos[4], nrm[4], vc[4], e[3], n[3], len;
@@ -2099,6 +2101,7 @@ static int lit_color(uint32_t index, float out[4])
     }
     len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
     if (len > 1e-8f) { n[0] /= len; n[1] /= len; n[2] /= len; }
+    if (back) { n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2]; }
     /* Optional (RECOMP_FFP_FLIP_NORMALS): light the side the viewer sees.
      * Some meshes carry normals that face away from the camera (X-Men
      * Legends' streets and sidewalks: authentic file data, drawn with culling
@@ -2113,11 +2116,13 @@ static int lit_color(uint32_t index, float out[4])
      * it cannot change how any other title is lit.
      * ponytail: per vertex, not per face; exact for flat ground, a vertex on
      * a silhouette may pick the other side. */
-    if (ffp_flip_normals() && n[0] * e[0] + n[1] * e[1] + n[2] * e[2] > 0.0f) {
+    if (!back && ffp_flip_normals() && n[0] * e[0] + n[1] * e[1] + n[2] * e[2] > 0.0f) {
         n[0] = -n[0]; n[1] = -n[1]; n[2] = -n[2];
     }
 
-    out[0] = reg_f(0x0A10); out[1] = reg_f(0x0A14); out[2] = reg_f(0x0A18);
+    for (i = 0; i < 3; i++)
+        out[i] = reg_f((back ? 0x17A0u : 0x0A10u) + 4 * (uint32_t)i);
+    colmat >>= back ? 8 : 0;
     for (i = 0; i < NV_LIGHTS; i++) {
         uint32_t kind = (mask >> (2 * i)) & 3, b = 0x1000 + (uint32_t)i * 0x80;
         float l[3], att = 1.0f, ndl, amb[3], dif[3];
@@ -2142,8 +2147,10 @@ static int lit_color(uint32_t index, float out[4])
         ndl = n[0] * l[0] + n[1] * l[1] + n[2] * l[2];
         if (ndl < 0.0f) ndl = 0.0f;
         for (k = 0; k < 3; k++) {
-            amb[k] = reg_f(b + 0x00 + 4 * k);
-            dif[k] = reg_f(b + 0x0C + 4 * k);
+            uint32_t m = back ? 0x0C00 + (uint32_t)i * 0x40 : b;
+
+            amb[k] = reg_f(m + 0x00 + 4 * k);
+            dif[k] = reg_f(m + 0x0C + 4 * k);
             /* COLOR_MATERIAL: 1 in the ambient (bits 2-3) or diffuse (bits
              * 4-5) field takes that material colour from the vertex. */
             if (have_vc && ((colmat >> 2) & 3) == 1) amb[k] *= vc[k];
@@ -2151,7 +2158,7 @@ static int lit_color(uint32_t index, float out[4])
             out[k] += att * (amb[k] + dif[k] * ndl);
         }
     }
-    out[3] = (have_vc && ((colmat >> 4) & 3) == 1) ? vc[3] : reg_f(0x03B4);
+    out[3] = (have_vc && ((colmat >> 4) & 3) == 1) ? vc[3] : reg_f(back ? 0x17AC : 0x03B4);
     for (i = 0; i < 4; i++)
         out[i] = out[i] < 0.0f ? 0.0f : out[i] > 1.0f ? 1.0f : out[i];
     return 1;
@@ -2184,10 +2191,16 @@ static int ffp_vertex(uint32_t index, Nv2aVshOutput *out)
     out->pos[2] = clip[2] / w + off[2];
     out->pos[3] = w;
 
-    if (!lit_color(index, c) && !fetch_attr(color_attr(), index, c))
+    if (!lit_color(index, 0, c) && !fetch_attr(color_attr(), index, c))
         c[0] = c[1] = c[2] = c[3] = 1.0f;
     for (i = 0; i < 4; i++)
         out->d0[i] = c[i] < 0.0f ? 0.0f : c[i] > 1.0f ? 1.0f : c[i];
+    /* Unlit, a back face is black. */
+    if (!s_reg[0x17C4 / 4] || !lit_color(index, 1, out->b0)) {
+        memset(out->b0, 0, sizeof out->b0);
+        out->b0[3] = 1.0f;
+    }
+    out->b1[3] = 1.0f;
 
     fetch_attr(texcoord_attr(), index, out->tex[0]);
     for (st = 1; st < 4; st++)

@@ -226,6 +226,63 @@ static void test_fixed_function(void)
     }
 }
 
+/* Lit from behind: nxdk_pgraph_tests' TwoSidedLighting, whose picture from the
+ * hardware has the back face's colours within 3 of 255 of these. */
+static void test_two_sided(void)
+{
+    static const struct { uint32_t reg; float v[3]; } lit[] = {
+        { 0x0A10, { 0.031373f, 0.031373f, 0.031373f } },    /* scene, front */
+        { 0x17A0, { 0, 0, 0 } },
+        { 0x1000, { 0, 0, 0 } },                            /* light 0: ambient */
+        { 0x100C, { 1, 0, 0.25f } },                        /* diffuse */
+        { 0x1034, { 0, 0, 1 } },                            /* direction */
+        { 0x0C00, { 0, 0, 0.25f } },                        /* its back colours */
+        { 0x0C0C, { 0, 0.75f, 0.35f } },
+        { 0x0C40, { 9, 9, 9 } },                            /* light 1's, off */
+    };
+    unsigned i, k;
+
+    for (i = 0; i < 16; i++)
+        method_float(0x0480 + 4 * i, i % 5 ? 0.0f : 1.0f);
+    for (i = 0; i < sizeof lit / sizeof lit[0]; i++)
+        for (k = 0; k < 3; k++)
+            method_float(lit[i].reg + 4 * k, lit[i].v[k]);
+    method_float(0x03B4, 1.0f);
+    method_float(0x17AC, 0.5f);
+    method(0x0298, 0);
+    method(0x03BC, 1);
+    method(0x0314, 1);
+    for (i = 0; i < 4; i++) {
+        put_float(0x2800 + 12 * i, 0);
+        put_float(0x2804 + 12 * i, 0);
+        put_float(0x2808 + 12 * i, -1);
+    }
+    method(0x1720 + 4 * 2, 0x2800);
+    method(0x1760 + 4 * 2, 2u | 3u << 4 | 12u << 8);
+    method(0x17C4, 1);
+    draw_arrays(5, 0, 3);
+    CHECK(s_got.transformed);
+    CHECK(near(s_got.out[0].d0[0], 0.031373f) && near(s_got.out[0].d0[3], 1));
+    CHECK(near(s_got.out[0].b0[0], 0) && near(s_got.out[0].b0[1], 0.75f));
+    CHECK(near(s_got.out[0].b0[2], 0.6f) && near(s_got.out[0].b0[3], 0.5f));
+    CHECK(near(s_got.out[0].b1[0], 0) && near(s_got.out[0].b1[3], 1));
+    method(0x0298, 1u << 12);                    /* the back diffuse: the vertex's */
+    for (i = 0; i < 16; i++)
+        put_float(0x2900 + 4 * i, 0.5f);
+    method(0x1720 + 4 * 3, 0x2900);
+    method(0x1760 + 4 * 3, 2u | 4u << 4 | 16u << 8);
+    draw_arrays(5, 0, 3);
+    CHECK(near(s_got.out[0].d0[0], 0.031373f) && near(s_got.out[0].b0[1], 0.375f));
+    method(0x0298, 0);
+    method(0x0314, 0);                           /* unlit */
+    draw_arrays(5, 0, 3);
+    CHECK(near(s_got.out[0].d0[0], 0.5f) && near(s_got.out[0].b0[1], 0));
+    CHECK(near(s_got.out[0].b0[3], 1));
+    method(0x17C4, 0);
+    method(0x1760 + 4 * 2, 2);
+    method(0x1760 + 4 * 3, 2);
+}
+
 /* The executor's own drawing needs three vertices; a batch back end is handed
  * points and lines. */
 static void test_points(void)
@@ -517,6 +574,7 @@ int main(void)
     configure();
     test_registration();
     test_fixed_function();
+    test_two_sided();
     test_points();
     test_textures_and_combiner();
     test_inline_and_immediate();
