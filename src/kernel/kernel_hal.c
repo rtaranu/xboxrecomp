@@ -1544,6 +1544,13 @@ VOID __stdcall xbox_AvSetDisplayMode(
         Step, Mode, Format, Pitch, FrameBuffer);
 }
 
+/* Direct3D 8 has each mode twice in its table, and takes the one with this bit
+ * when the title asks for widescreen (six titles' tables; one has been
+ * seen to set it). */
+#define AV_MODE_WIDE 0x10000000u
+
+int xbox_DisplayIsWide(void) { return (g_av_display_mode & AV_MODE_WIDE) != 0; }
+
 /* ============================================================================
  * SMBus - HalReadSMBusValue / HalWriteSMBusValue
  *
