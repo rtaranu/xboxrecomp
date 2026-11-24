@@ -5,7 +5,8 @@ add_executable(nv2a-tex-filter-test nv2a_tex_filter_test.c
     ../../src/kernel/nv2a_pb_exec.c
     ../../src/kernel/nv2a_vsh_interp.c
     ../../src/kernel/nv2a_combiner.c
-    ../../src/kernel/nv2a_flip_hold.c)
+    ../../src/kernel/nv2a_flip_hold.c
+    ../../src/kernel/nv2a_perf.c)
 target_include_directories(nv2a-tex-filter-test PRIVATE ../../src/kernel ../../src)
 if(MSVC)
     target_compile_definitions(nv2a-tex-filter-test PRIVATE _CRT_SECURE_NO_WARNINGS)

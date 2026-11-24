@@ -23,6 +23,7 @@
 
 #include "nv2a_backend_batch.h"
 #include "nv2a_capture.h"
+#include "nv2a_perf.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -345,6 +346,7 @@ int main(int argc, char **argv)
         s_transform = !strcmp(mode, "transform");
         nv2a_backend_register_batches(&s_taker);
     }
+    nv2a_perf_phase(NV2A_PERF_WORK);    /* RECOMP_PERF_LOG: there is no title */
     for (i = 0; i < repeat; i++) {
         double ms = play(&words);
         printf("%s pass %d: %.2f ms\n", mode, i + 1, ms);

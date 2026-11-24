@@ -21,6 +21,7 @@
 #include "kernel_missing.h"
 #include "nv2a_flip_hold.h"
 #include "nv2a_capture.h"
+#include "nv2a_perf.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1467,6 +1468,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
          * flips paces only the last. */
         extern int nv2a_pb_exec_flip_poll(void);
         int flip_held = nv2a_pb_exec_flip_poll();
+        nv2a_perf_phase(flip_held ? NV2A_PERF_HOLD : NV2A_PERF_TITLE);
         nv2a_ack_busy_bits(flip_held);
         for (size_t i = 0; i < sizeof(NV2A_IDLE) / sizeof(NV2A_IDLE[0]); i++) {
             volatile uint32_t *r =
@@ -1518,6 +1520,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             uint32_t put = *(volatile uint32_t *)((char *)regs + NV2A_USER_DMA_PUT);
             if (!flip_held
                     && (put != last_put || (now_ms - last_put_ms) > 2000)) {
+                nv2a_perf_phase(NV2A_PERF_WORK);
                 /* Survey the segment the title just submitted, once. */
                 {
                     extern void nv2a_pb_scan(uint32_t);
@@ -1608,6 +1611,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     extern void nv2a_pb_exec_idle(void);
                     nv2a_pb_exec_idle();
                 }
+                nv2a_perf_phase(NV2A_PERF_TITLE);
                 last_put = put; last_put_ms = now_ms;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET

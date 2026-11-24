@@ -5,7 +5,8 @@ set(CMAKE_C_STANDARD 11)
 set(K ${CMAKE_CURRENT_SOURCE_DIR}/../../src/kernel)
 add_executable(nv2a-capture-test nv2a_capture_test.c ${K}/nv2a_capture.c
     ${K}/nv2a_pb_exec.c ${K}/nv2a_vsh_interp.c ${K}/nv2a_combiner.c
-    ${K}/nv2a_flip_hold.c)
+    ${K}/nv2a_flip_hold.c
+    ${K}/nv2a_perf.c)
 target_include_directories(nv2a-capture-test PRIVATE ${K} ${K}/..)
 if(MSVC)
     target_compile_definitions(nv2a-capture-test PRIVATE _CRT_SECURE_NO_WARNINGS)

@@ -116,6 +116,7 @@ The executor is itself opt-in: set `RECOMP_PB_EXEC=1` to execute the pushbuffer.
 | `RECOMP_FB_DUMP_FLIPS` | off | `1` dumps every flip; any other value names a file whose existence turns dumping on. | `nv2a_pb_exec.c` |
 | `RECOMP_FRAME_CAPTURE=<path>` | off | While `<path>.go` exists at a flip, saves the next frame's commands and the memory they read to `<path>-<n>.nvcap`, for `tools/nv2a_replay`. Game data. | `nv2a_capture.c` |
 | `RECOMP_FRAME_CAPTURE_FRAMES=N` | 1 | Frames per capture. | `nv2a_capture.c` |
+| `RECOMP_PERF_LOG=<s>` | off | A `[PERF]` line every s seconds: where the frames' time went ([what it says](../technical/nv2a-vulkan.md#where-a-frames-time-goes)). Any rasteriser. | `nv2a_perf.c` |
 | `RECOMP_FIND_NAN` | off | Scans for NaN matrices at every report. | `nv2a_pb_exec.c` |
 | `RECOMP_FIND_QUAD` | off | Scans once for quad vertices. | `nv2a_pb_exec.c` |
 

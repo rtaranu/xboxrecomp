@@ -9,7 +9,8 @@ add_executable(nv2a-replay nv2a_replay.c
     ${NV2A_REPLAY_KERNEL}/nv2a_pb_exec.c
     ${NV2A_REPLAY_KERNEL}/nv2a_vsh_interp.c
     ${NV2A_REPLAY_KERNEL}/nv2a_combiner.c
-    ${NV2A_REPLAY_KERNEL}/nv2a_flip_hold.c)
+    ${NV2A_REPLAY_KERNEL}/nv2a_flip_hold.c
+    ${NV2A_REPLAY_KERNEL}/nv2a_perf.c)
 target_include_directories(nv2a-replay PRIVATE
     ${NV2A_REPLAY_KERNEL} ${NV2A_REPLAY_KERNEL}/..)
 if(MSVC)

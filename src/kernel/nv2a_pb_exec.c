@@ -33,6 +33,7 @@
 #include "kernel.h"   /* XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE */
 #include "xbox_memory_layout.h"   /* xbox_Nv2aFrameCounterFlip */
 #include "nv2a_flip_hold.h"
+#include "nv2a_perf.h"
 #include "platform/host_time.h"   /* xbox_HostNowNs */
 #if !defined(_WIN32)
 #include <pthread.h>              /* the raster worker pool */
@@ -938,6 +939,7 @@ static int batch_backend_clear(uint32_t flags)
     Nv2aTarget target;
     Nv2aRenderState rs;
     Nv2aRawClear c;
+    int part, cleared;
 
     if (!s_batch_backend || !s_batch_backend->clear)
         return 0;
@@ -950,7 +952,10 @@ static int batch_backend_clear(uint32_t flags)
     c.rect_h   = s_gpu.clear_rect_h;
     c.rect_v   = s_gpu.clear_rect_v;
     c.regs     = s_reg;
-    if (!s_batch_backend->clear(&target, &rs, &c))
+    part = nv2a_perf_part(NV2A_PERF_DRAWS);
+    cleared = s_batch_backend->clear(&target, &rs, &c);
+    nv2a_perf_part(part);
+    if (!cleared)
         return 0;
     s_gpu.clears++;
     return 1;
@@ -3749,7 +3754,7 @@ static int batch_backend_draw(void)
     return drawn;
 }
 
-static void raster_batch(void)
+static void raster_batch_drawn(void)
 {
     uint32_t i;
     uint32_t before = s_gpu.tris_drawn;
@@ -3889,6 +3894,14 @@ static void frame_trace_flip(void)
         s_ftrace = 2;
         fprintf(stderr, "[FTRACE] frame begins (flip %u)\n", s_gpu.flips);
     }
+}
+
+static void raster_batch(void)
+{
+    int part = nv2a_perf_part(NV2A_PERF_DRAWS);
+
+    raster_batch_drawn();
+    nv2a_perf_part(part);
 }
 
 static void draw_primitive(void)
@@ -4863,6 +4876,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         s_gpu.drawn_stale = 1;
         if (s_backend && s_backend->flip)
             s_backend->flip();
+        nv2a_perf_frame();
 
         if (verbose) {
             static unsigned n;
