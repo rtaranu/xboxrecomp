@@ -796,13 +796,39 @@ void nv2a_backend_register(const Nv2aBackend *backend)
 /* The optional back end that takes batches before transform
  * (nv2a_backend_batch.h). */
 static const Nv2aBatchBackend *s_batch_backend;
+static int s_report_taken;              /* since it was last told of idling */
 
 int nv2a_backend_register_batches(const Nv2aBatchBackend *backend)
 {
     if (backend && backend->version != NV2A_BATCH_VERSION)
         return 0;
     s_batch_backend = backend;
+    s_report_taken = 0;
     return 1;
+}
+
+/* A time, the count, and 0 for "done", last: the title polls it. */
+void nv2a_batch_report(void *to, uint64_t time, uint32_t pixels)
+{
+    uint8_t *p = (uint8_t *)to;
+
+    memcpy(p, &time, 8);
+    memcpy(p + 8, &pixels, 4);
+#if defined(_WIN32)
+    InterlockedExchange((volatile LONG *)(p + 12), 0);
+#else
+    __atomic_store_n((uint32_t *)(p + 12), 0u, __ATOMIC_RELEASE);
+#endif
+}
+
+/* From the thread that walks the pushbuffer, once it has walked all of it. */
+void nv2a_pb_exec_idle(void)
+{
+    if (!s_report_taken)
+        return;
+    s_report_taken = 0;
+    if (s_batch_backend && s_batch_backend->idle)
+        s_batch_backend->idle();
 }
 
 /* The fewest vertices worth drawing: the triangle paths need three, a batch
@@ -4558,24 +4584,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
     case 0x09C4: memcpy(&s_gpu.fog_param[1], &param, 4); break;
     case 0x17C8:                                  /* CLEAR_REPORT_VALUE */
         s_gpu.zpass_count = 0;
+        if (s_batch_backend && s_batch_backend->report_clear)
+            s_batch_backend->report_clear();
         break;
     case 0x17CC:                                  /* SET_ZPASS_PIXEL_COUNT_ENABLE */
         s_gpu.zpass_enable = param;
         break;
     case 0x17D0: {                                /* GET_REPORT */
         /* The GPU's answer to a visibility test: 16 bytes at the report
-         * DMA offset -- a timestamp, the pixel count, and 0 for "done".
-         * Never written, a title polling it (D3D's GetVisibilityTestResult
+         * DMA offset (nv2a_batch_report). Never written, a title polling it (D3D's GetVisibilityTestResult
          * starts the slot at 0xFFFFFFFF) sees every test incomplete. Burnout
          * 3 culls its world with these, so the race's main view drew only
          * the sky while the cube-map passes, which do not test, drew it all.
          * The report DMA object starts at physical 0 here, as D3D sets it. */
-        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-        uint32_t at = dma_resolve(param & 0x00FFFFFFu);
-        uint64_t stamp = (uint64_t)s_gpu.reports++ * 1000u;
-        memcpy(mem + at, &stamp, 8);
-        memcpy(mem + at + 8, &s_gpu.zpass_count, 4);
-        memset(mem + at + 12, 0, 4);
+        Nv2aReport r;
+        r.va = dma_resolve(param & 0x00FFFFFFu);
+        r.time = (uint64_t)s_gpu.reports++ * 1000u;
+        r.pixels = s_gpu.zpass_count;
+        if (s_batch_backend && s_batch_backend->report && s_batch_backend->report(&r))
+            s_report_taken = 1;
+        else
+            nv2a_batch_report((uint8_t *)xbox_GetMemoryOffset() + r.va, r.time, r.pixels);
         break;
     }
     case NV097_SET_BLEND_COLOR:

@@ -1603,6 +1603,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     *get = put;
                     get_written = put;
                 }
+                {
+                    extern void nv2a_pb_exec_idle(void);
+                    nv2a_pb_exec_idle();
+                }
                 last_put = put; last_put_ms = now_ms;
                 /* GET as well as PUT. A title that stops submitting has either
                  * finished or is spinning on the GPU catching up, and only GET

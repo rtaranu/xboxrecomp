@@ -127,7 +127,22 @@ static int on_clear(const Nv2aTarget *t, const Nv2aRenderState *rs,
     return s_got.accept;
 }
 
-static const Nv2aBatchBackend s_ours = { NV2A_BATCH_VERSION, on_draw, on_clear };
+static struct { int clears, reports, idles, accept; Nv2aReport r; } s_rep;
+
+static void on_report_clear(void) { s_rep.clears++; }
+
+static int on_report(const Nv2aReport *r)
+{
+    s_rep.reports++;
+    s_rep.r = *r;
+    return s_rep.accept;
+}
+
+static void on_idle(void) { s_rep.idles++; }
+
+static const Nv2aBatchBackend s_ours = {
+    NV2A_BATCH_VERSION, on_draw, on_clear, on_report_clear, on_report, on_idle
+};
 
 /* A 16x8 surface, positions at 0x2000 (float4 x 3) under an orthographic
  * composite matrix. */
@@ -340,6 +355,55 @@ static void test_clear(void)
     CHECK(s_got.clear.rect_v == (1u | (4u << 16)));
 }
 
+extern void nv2a_pb_exec_idle(void);
+
+/* A report is the back end's to write, or the executor's. */
+static void test_reports(void)
+{
+    uint32_t w[4];
+    uint64_t first;
+
+    memset(s_mem + 0x3000, 0xFF, 16);
+    s_rep.accept = 1;
+    nv2a_pb_exec_idle();
+    CHECK(s_rep.idles == 0);                     /* none asked for */
+    method(0x17C8, 1);
+    CHECK(s_rep.clears == 1);
+    method(0x17CC, 1);
+    method(0x17CC, 0);
+    method(0x17D0, 0x01003000u);
+    CHECK(s_rep.reports == 1 && s_rep.r.pixels == 0);
+    first = s_rep.r.time;
+    memcpy(w, s_mem + 0x3000, 16);
+    CHECK(w[2] == 0xFFFFFFFFu && w[3] == 0xFFFFFFFFu);
+    nv2a_pb_exec_idle();
+    nv2a_pb_exec_idle();
+    CHECK(s_rep.idles == 1);
+    nv2a_batch_report(s_mem + 0x3000, 0x123456789ull, 77);
+    memcpy(w, s_mem + 0x3000, 16);
+    CHECK(w[0] == 0x23456789u && w[1] == 1 && w[2] == 77 && w[3] == 0);
+
+    s_rep.accept = 0;
+    memset(s_mem + 0x3000, 0xFF, 16);
+    method(0x17D0, 0x01003000u);
+    memcpy(w, s_mem + 0x3000, 16);
+    CHECK(s_rep.reports == 2 && s_rep.r.time > first);
+    CHECK(w[0] == (uint32_t)s_rep.r.time && w[2] == 0 && w[3] == 0);
+    nv2a_pb_exec_idle();
+    CHECK(s_rep.idles == 1);
+
+    /* What the executor drew itself is handed over. */
+    s_got.accept = 0;
+    method(0x17C8, 1);
+    method(0x17CC, 1);
+    draw_arrays(5, 0, 3);
+    method(0x17CC, 0);
+    method(0x17D0, 0x01003000u);
+    memcpy(w, s_mem + 0x3000, 16);
+    CHECK(w[2] > 0 && w[2] == s_rep.r.pixels);
+    s_got.accept = 1;
+}
+
 /* Refused, a batch or a clear goes where it went before. */
 static void test_refusal_and_removal(void)
 {
@@ -379,6 +443,7 @@ int main(void)
     test_inline_and_immediate();
     test_program();
     test_clear();
+    test_reports();
     test_refusal_and_removal();
     if (!s_fail)
         puts("NV2A batch back end: ok");

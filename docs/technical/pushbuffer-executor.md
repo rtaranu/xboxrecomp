@@ -206,7 +206,8 @@ create its window and device lazily and pump messages from `flip`.
 A back end that transforms vertices itself, or needs all four stages and the
 combiners, registers an `Nv2aBatchBackend` as well (`nv2a_backend_batch.h`): it
 gets each batch before transform, points and lines included, with the state as
-the title programmed it. A batch it refuses takes the path above.
+the title programmed it, and may answer visibility tests. A batch it refuses
+takes the path above.
 
 Things a back end should get right. These come from a Direct3D 11 back end
 written against this interface for one title; that back end is not in this

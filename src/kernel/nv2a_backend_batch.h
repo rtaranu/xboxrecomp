@@ -13,7 +13,7 @@
  * if one is registered, the executor's own drawing otherwise. flip and
  * present_sync stay with Nv2aBackend.
  *
- * Both callbacks run on the executor's thread, one call at a time, and the
+ * Its callbacks run on the executor's thread, one call at a time, and the
  * next command waits for them. Every pointer is valid for the call only. Once
  * it returns, the title may be told the GPU is past the batch and reuse its
  * vertices and textures, so a back end that records for later copies what it
@@ -28,7 +28,7 @@
 #include "nv2a_vsh_interp.h"
 
 /* Goes up with every change to the structures below. */
-#define NV2A_BATCH_VERSION 1u
+#define NV2A_BATCH_VERSION 2u
 
 /* What is being drawn into. Unlike Nv2aSurface's, the fields needed to find a
  * pixel in memory are all here. */
@@ -109,12 +109,33 @@ typedef struct {
                                          * inclusive, as sent */
 } Nv2aRawClear;
 
+/* A visibility test's answer, as the title asked for it (GET_REPORT). */
+typedef struct {
+    uint32_t va;                        /* 16 bytes of guest memory */
+    uint64_t time;
+    uint32_t pixels;                    /* counted by the executor's own drawing
+                                         * since the last CLEAR_REPORT_VALUE */
+} Nv2aReport;
+
 typedef struct {
     uint32_t version;                   /* NV2A_BATCH_VERSION */
-    /* Either may be NULL. Nonzero: done. */
+    /* Each may be NULL. Nonzero: done. */
     int (*draw)(const Nv2aRawBatch *b);
     int (*clear)(const Nv2aTarget *t, const Nv2aRenderState *rs,
                  const Nv2aRawClear *c);
+    /* Visibility tests: pixels that pass every test of batches drawn while
+     * regs[0x17CC / 4] (SET_ZPASS_PIXEL_COUNT_ENABLE) is not 0. Clears do not
+     * count.
+     * report_clear: the count starts at 0 again.
+     * report: nonzero if the back end answers, with nv2a_batch_report() on any
+     * thread, once it has the count: pixels plus its own. Until then the title
+     * sees the test unfinished, and it may wait. 0: answered by the executor,
+     * with pixels.
+     * idle: a report was taken, and every command the title sent so far has
+     * been carried out. It may be waiting for the answer. */
+    void (*report_clear)(void);
+    int (*report)(const Nv2aReport *r);
+    void (*idle)(void);
 } Nv2aBatchBackend;
 
 /* Register (or, with NULL, remove) the back end; as nv2a_backend_register, to
@@ -128,5 +149,8 @@ int nv2a_backend_register_batches(const Nv2aBatchBackend *backend);
  * negative), colours and texture coordinates as the vertex stage put them out.
  * Returns 0 if a vertex could not be transformed. */
 int nv2a_batch_transform(uint32_t first, uint32_t count, Nv2aVshOutput *out);
+
+/* Writes a report: `to` is the host's address of it. */
+void nv2a_batch_report(void *to, uint64_t time, uint32_t pixels);
 
 #endif /* NV2A_BACKEND_BATCH_H */
