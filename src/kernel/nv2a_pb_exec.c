@@ -921,6 +921,7 @@ static int batch_backend_clear(uint32_t flags)
     c.rect_set = (s_gpu.clear_rect_set & 3) == 3;
     c.rect_h   = s_gpu.clear_rect_h;
     c.rect_v   = s_gpu.clear_rect_v;
+    c.regs     = s_reg;
     if (!s_batch_backend->clear(&target, &rs, &c))
         return 0;
     s_gpu.clears++;

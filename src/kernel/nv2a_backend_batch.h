@@ -107,6 +107,7 @@ typedef struct {
     int      rect_set;                  /* the rectangle below was sent */
     uint32_t rect_h, rect_v;            /* SET_CLEAR_RECT_*: first | last << 16,
                                          * inclusive, as sent */
+    const uint32_t *regs;               /* Nv2aRawBatch's */
 } Nv2aRawClear;
 
 /* A visibility test's answer, as the title asked for it (GET_REPORT). */
