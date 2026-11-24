@@ -10,6 +10,8 @@
 #include <string.h>
 
 #define xbox_GetMemoryOffset present_test_memory_offset
+#define nv2a_hook_pvideo_snapshot present_test_pvideo_snapshot
+#define nv2a_hook_pvideo_consume present_test_pvideo_consume
 #include "../../src/video/fb_present.c"
 #undef xbox_GetMemoryOffset
 
@@ -21,6 +23,9 @@
 typedef void (*recomp_func_t)(void);
 
 static uint8_t *guest;
+static ptrdiff_t guest_at;              /* the guest address it is for */
+static uint32_t pvideo[0x1000 / 4];
+static int pvideo_there;
 static uint32_t *output;
 static HANDLE started, finished;
 static int copy_result;
@@ -28,7 +33,19 @@ static volatile LONG stress_done;
 
 ptrdiff_t present_test_memory_offset(void)
 {
-    return (ptrdiff_t)guest;
+    return (ptrdiff_t)guest - guest_at;
+}
+
+bool present_test_pvideo_snapshot(uint32_t regs[0x1000 / 4])
+{
+    if (pvideo_there)
+        memcpy(regs, pvideo, sizeof pvideo);
+    return pvideo_there != 0;
+}
+
+void present_test_pvideo_consume(unsigned bank)
+{
+    pvideo[NV_PVIDEO_BUFFER / 4] &= ~(1u << (bank * 4));
 }
 
 recomp_func_t recomp_lookup(uint32_t xbox_va)
@@ -98,6 +115,51 @@ static int test_formats_and_gates(void)
     xbox_FramebufferWindowPresent(FRAME_VA, 640u * 8u);
     xbox_FramebufferWindowSetAA(1);
     return fb_copy_presented_frame(output) && output_is(0x00010203u);
+}
+
+/* The video overlay for a renderer that draws it itself. */
+static int test_overlay(void)
+{
+    static const uint8_t white[4] = { 235, 128, 235, 128 };
+    uint32_t *rgb = output;
+    int ok;
+
+#define PV(r) pvideo[(r) / 4]
+#define DRAWN (rgb[5 * 640 + 7] == 0xFFFFFFFFu && rgb[5 * 640 + 8] == 0xFFFFFFFFu \
+               && rgb[5 * 640 + 6] == 5 && rgb[5 * 640 + 9] == 5 && rgb[4 * 640 + 7] == 5)
+#define CLEAR() do { size_t n; for (n = 0; n < FRAME_PIXELS; n++) rgb[n] = 5; } while (0)
+    if (xbox_FramebufferOverlayState() != 0)
+        return 0;
+    pvideo_there = 1;
+    if (xbox_FramebufferOverlayState() != 0)
+        return 0;
+    guest_at = 0x80000000;
+    memcpy(guest + 0x2000, white, 4);
+    PV(NV_PVIDEO_BASE) = 0x1000;
+    PV(NV_PVIDEO_OFFSET) = 0x1000;
+    PV(NV_PVIDEO_LIMIT) = 0xFFFFFFFFu;
+    PV(NV_PVIDEO_BUFFER) = NV_PVIDEO_BUFFER_0_USE;
+    PV(NV_PVIDEO_FORMAT) = (NV_PVIDEO_FORMAT_COLOR_LE_CR8YB8CB8YA8 << 16) | 4;
+    PV(NV_PVIDEO_SIZE_IN) = (1u << 16) | 2u;
+    PV(NV_PVIDEO_POINT_OUT) = (5u << 16) | 7u;
+    PV(NV_PVIDEO_SIZE_OUT) = (1u << 16) | 2u;
+    PV(NV_PVIDEO_DS_DX) = PV(NV_PVIDEO_DT_DY) = NV_PVIDEO_DIN_DOUT_UNITY;
+    CLEAR();
+    ok = xbox_FramebufferOverlayState() == 2;           /* a new frame */
+    xbox_FramebufferOverlay(rgb);
+    ok = ok && DRAWN && PV(NV_PVIDEO_BUFFER) == 0 && xbox_FramebufferOverlayState() == 1;
+    memset(guest + 0x2000, 0, 4);                       /* its memory is used again */
+    CLEAR();
+    xbox_FramebufferOverlay(rgb);
+    ok = ok && DRAWN && xbox_FramebufferOverlayState() == 1;
+    PV(NV_PVIDEO_STOP) = 1;
+    CLEAR();
+    ok = ok && xbox_FramebufferOverlayState() == 2;     /* it is to go */
+    xbox_FramebufferOverlay(rgb);
+    ok = ok && rgb[5 * 640 + 7] == 5 && xbox_FramebufferOverlayState() == 0;
+    pvideo_there = 0;
+    guest_at = 0;
+    return ok;
 }
 
 static DWORD WINAPI publish_frame(LPVOID unused)
@@ -222,6 +284,8 @@ int main(void)
     ok = test_formats_and_gates();
     if (!ok)
         fprintf(stderr, "Presentation format or gate regression\n");
+    if (ok && !(ok = test_overlay()))
+        fprintf(stderr, "The video overlay was not drawn, kept or ended\n");
     if (ok && !(ok = test_lock_excludes_writer()))
         fprintf(stderr, "Presentation writer did not respect the snapshot lock\n");
     if (ok && !(ok = test_lock_excludes_reader()))

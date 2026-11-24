@@ -74,16 +74,18 @@ static uint8_t      *s_pvideo_source;
 static size_t        s_pvideo_bytes;
 static unsigned      s_pvideo_bank;
 static uint32_t      s_pvideo_regs[0x1000 / 4];
+static SRWLOCK       s_pvideo_lock = SRWLOCK_INIT;
 
-/* Draw the video overlay over s_rgb: a newly submitted bank if there is one
- * (copied, drawn, then handed back to the title), else the last frame. */
-static void fb_overlay(void)
+/* Draw the video overlay over rgb, the window's frame: a newly submitted bank if
+ * there is one (copied, drawn, then handed back to the title), else the last
+ * frame. */
+static void fb_overlay_locked(uint32_t *rgb)
 {
     uint32_t regs[0x1000 / 4];
     unsigned bank;
     bool presented = false;
 
-    if (!s_rgb || !nv2a_hook_pvideo_snapshot(regs)) return;
+    if (!rgb || !nv2a_hook_pvideo_snapshot(regs)) return;
     if ((regs[NV_PVIDEO_STOP / 4] & 1u) ||
         (s_pvideo_source &&
          regs[(NV_PVIDEO_SIZE_IN + s_pvideo_bank * 4) / 4] == UINT32_MAX)) {
@@ -113,7 +115,7 @@ static void fb_overlay(void)
         snapshot = (uint8_t *)malloc((size_t)bytes);
         if (!snapshot) continue;
         memcpy(snapshot, (const void *)va, (size_t)bytes);
-        if (!pvideo_scanout(regs, snapshot, (size_t)bytes, s_rgb,
+        if (!pvideo_scanout(regs, snapshot, (size_t)bytes, rgb,
                             s_fb_width, s_fb_height, bank)) {
             free(snapshot);
             continue;
@@ -127,8 +129,31 @@ static void fb_overlay(void)
         nv2a_hook_pvideo_consume(bank);
     }
     if (!presented && s_pvideo_source)
-        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, s_rgb,
+        pvideo_scanout(s_pvideo_regs, s_pvideo_source, s_pvideo_bytes, rgb,
                        s_fb_width, s_fb_height, s_pvideo_bank);
+}
+
+void xbox_FramebufferOverlay(uint32_t *rgb)
+{
+    AcquireSRWLockExclusive(&s_pvideo_lock);
+    fb_overlay_locked(rgb);
+    ReleaseSRWLockExclusive(&s_pvideo_lock);
+}
+
+int xbox_FramebufferOverlayState(void)
+{
+    uint32_t regs[0x1000 / 4];
+    int held, stopped;
+
+    if (!nv2a_hook_pvideo_snapshot(regs))
+        return 0;
+    AcquireSRWLockShared(&s_pvideo_lock);
+    held = s_pvideo_source != NULL;
+    ReleaseSRWLockShared(&s_pvideo_lock);
+    stopped = regs[NV_PVIDEO_STOP / 4] & 1u;
+    if (stopped ? held : (regs[NV_PVIDEO_BUFFER / 4] & 0x11u) != 0)
+        return 2;
+    return held;
 }
 
 void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch)
@@ -565,7 +590,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
 
     fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
             s_fb_width, s_fb_height);
-    if (gpu_present_enabled())
+    if (gpu_present_enabled() && !s_fb_external)
         gpu_present_init(hwnd, s_fb_width, s_fb_height);
 
     while (InterlockedCompareExchange(&s_fb_running, 1, 1)) {
@@ -575,14 +600,14 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
-        if (InterlockedCompareExchange(&s_fb_external, 1, 1)) {
+        if (s_fb_external & 1) {
             /* A host renderer owns the window's pixels. */
         } else if (s_rgb && fb_copy_presented_frame(s_rgb)) {
             /* A finished frame, published by the flip. Copied into s_rgb so
              * the dump path and GDI see one consistent image even if the
              * next flip lands mid-blit. */
             if (!fb_pinned)
-                fb_overlay();
+                xbox_FramebufferOverlay(s_rgb);
             paced = fb_show(hwnd, hdc, &bi);
         } else if (s_fb_va && s_fb_pitch && s_rgb) {
             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
@@ -591,7 +616,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                 (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
             fb_convert(src, s_fb_pitch / s_fb_width);
             if (!fb_pinned)
-                fb_overlay();
+                xbox_FramebufferOverlay(s_rgb);
             paced = fb_show(hwnd, hdc, &bi);
         }
         {
@@ -654,7 +679,7 @@ void *xbox_FramebufferWindowHandle(void)
 
 void xbox_FramebufferWindowSetExternal(int on)
 {
-    InterlockedExchange(&s_fb_external, on ? 1 : 0);
+    InterlockedExchange(&s_fb_external, on);
 }
 
 void xbox_FramebufferWindowStart(void)

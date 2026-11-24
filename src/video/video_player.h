@@ -69,9 +69,16 @@ void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars);
 void xbox_FramebufferWindowFrameStats(uint32_t draws);
 /* For a host renderer presenting to the window itself: the HWND (NULL until
  * the window exists), and a switch that stops the window drawing guest
- * memory; it still pumps messages and updates the title bar. */
+ * memory; it still pumps messages and updates the title bar. The toolkit's own
+ * says 2 until it presents: the window draws, but not with D3D11, which would
+ * keep it for itself; then 3, and it draws the video overlay too. */
 void *xbox_FramebufferWindowHandle(void);
 void  xbox_FramebufferWindowSetExternal(int on);
+/* For 3. Whether the video overlay is to be drawn: 0 no, 1 as it was, 2 there is
+ * a new frame, or it is no longer there. And draws it, over 640x480 pixels,
+ * 0xAARRGGBB; its new frame's memory is the title's again then. One thread. */
+int   xbox_FramebufferOverlayState(void);
+void  xbox_FramebufferOverlay(uint32_t *rgb);
 
 #if !defined(_WIN32)
 /* POSIX hosts: the framebuffer window needs the process main thread (AppKit
