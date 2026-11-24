@@ -409,6 +409,80 @@ static void test_reports(void)
     s_got.accept = 1;
 }
 
+/* Pixels of the triangle, at this depth, that the executor's own depth test
+ * passes. */
+static uint32_t visible(float z)
+{
+    uint32_t i, w[4];
+
+    for (i = 0; i < 3; i++)
+        put_float(0x2000 + 16 * i + 8, z);
+    s_got.accept = 0;
+    method(0x17C8, 1);
+    method(0x17CC, 1);
+    draw_arrays(5, 0, 3);
+    method(0x17CC, 0);
+    method(0x17D0, 0x01003000u);
+    memcpy(w, s_mem + 0x3000, 16);
+    return w[2];
+}
+
+static void clear_depth(uint32_t zeta, uint32_t value, int accept)
+{
+    s_got.accept = accept;
+    method(0x0214, zeta);
+    method(0x1D8C, value);
+    method(0x1D94, 0x01);
+}
+
+/* The executor's own depth, whoever takes the clears and whenever it is
+ * filled: what a draw sees is the last clear of its surface. */
+static void test_own_depth(void)
+{
+    uint32_t i, all;
+
+    method(0x030C, 1);                           /* DEPTH_TEST_ENABLE */
+    method(0x0354, 0x201);                       /* DEPTH_FUNC: less */
+    method(0x035C, 1);                           /* DEPTH_MASK */
+    clear_depth(ZETA_AT, 1000, 0);
+    all = visible(100.0f);
+    CHECK(all > 0 && visible(100.0f) == 0);
+    clear_depth(ZETA_AT, 1000, 0);
+    CHECK(visible(500.0f) == all && visible(600.0f) == 0);
+
+    clear_depth(ZETA_AT, 50, 1);                 /* by a back end */
+    CHECK(visible(100.0f) == 0);
+    clear_depth(ZETA_AT, 1000, 1);
+    CHECK(visible(100.0f) == all);
+    clear_depth(ZETA_AT, 1000, 0);               /* the last one counts */
+    clear_depth(ZETA_AT, 50, 0);
+    CHECK(visible(100.0f) == 0);
+    clear_depth(ZETA_AT, 50, 0);
+    method(0x1D8C, 1000);                        /* the value as it was then */
+    CHECK(visible(100.0f) == 0);
+
+    clear_depth(ZETA_AT, 50, 0);                 /* each its own */
+    clear_depth(ZETA_AT + 0x100, 1000, 0);
+    CHECK(visible(100.0f) == all);
+    method(0x0214, ZETA_AT);
+    CHECK(visible(100.0f) == 0);
+
+    /* Four are kept; one that is new hides nothing. */
+    for (i = 2; i < 6; i++)
+        clear_depth(ZETA_AT + 0x100 * i, 50, 0);
+    method(0x0214, ZETA_AT + 0x600);
+    CHECK(visible(100.0f) == all);
+    method(0x0214, ZETA_AT + 0x500);
+    CHECK(visible(100.0f) == 0);
+
+    method(0x030C, 0);
+    method(0x035C, 0);
+    method(0x0214, ZETA_AT);
+    for (i = 0; i < 3; i++)
+        put_float(0x2000 + 16 * i + 8, 0.0f);
+    s_got.accept = 1;
+}
+
 /* Refused, a batch or a clear goes where it went before. */
 static void test_refusal_and_removal(void)
 {
@@ -449,6 +523,7 @@ int main(void)
     test_program();
     test_clear();
     test_reports();
+    test_own_depth();
     test_refusal_and_removal();
     if (!s_fail)
         puts("NV2A batch back end: ok");

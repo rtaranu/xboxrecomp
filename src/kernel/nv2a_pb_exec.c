@@ -2425,7 +2425,7 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
  * the title does reads it back, so a float buffer per zeta offset is enough. */
 #define NV_ZBUF_W 1280   /* 640x480 at 2x2 anti-aliasing */
 #define NV_ZBUF_H 1024
-static struct { uint32_t offset; float *z; } s_zbufs[4];
+static struct { uint32_t offset; float *z; float fill; int unfilled; } s_zbufs[4];
 static int s_ftrace;            /* frame trace: 0 idle, 2 tracing, 3 done */
 static int s_zbuf_next;
 
@@ -2437,34 +2437,51 @@ static float zclear_value(void)
                    : (float)(s_gpu.zstencil_clear >> 8);
 }
 
-static float *zbuf_current(int create)
+/* The buffer of the zeta surface in use, as an index; -1: no memory. */
+static int zbuf_slot(void)
 {
     int i;
-    size_t k;
 
     for (i = 0; i < 4; i++)
         if (s_zbufs[i].z && s_zbufs[i].offset == s_gpu.zeta_offset)
-            return s_zbufs[i].z;
-    if (!create)
-        return NULL;
+            return i;
     i = s_zbuf_next++ & 3;
     if (!s_zbufs[i].z)
         s_zbufs[i].z = (float *)malloc(sizeof(float) * NV_ZBUF_W * NV_ZBUF_H);
     if (!s_zbufs[i].z)
-        return NULL;
+        return -1;
     s_zbufs[i].offset = s_gpu.zeta_offset;
-    for (k = 0; k < (size_t)NV_ZBUF_W * NV_ZBUF_H; k++)
-        s_zbufs[i].z[k] = 3.4e38f;
+    s_zbufs[i].fill = 3.4e38f;
+    s_zbufs[i].unfilled = 1;
+    return i;
+}
+
+/* To draw with. A batch's triangles are all drawn before the next clear, so
+ * none is waiting for what a fill put off until here overwrites. */
+static float *zbuf_current(void)
+{
+    int i = zbuf_slot();
+    size_t k;
+
+    if (i < 0)
+        return NULL;
+    if (s_zbufs[i].unfilled) {
+        s_zbufs[i].unfilled = 0;
+        for (k = 0; k < (size_t)NV_ZBUF_W * NV_ZBUF_H; k++)
+            s_zbufs[i].z[k] = s_zbufs[i].fill;
+    }
     return s_zbufs[i].z;
 }
 
+/* 5 MB: filled when something is drawn here, which with a back end it is not. */
 static void zbuf_clear(void)
 {
-    float *z = zbuf_current(1), v = zclear_value();
-    size_t k;
-    if (z)
-        for (k = 0; k < (size_t)NV_ZBUF_W * NV_ZBUF_H; k++)
-            z[k] = v;
+    int i = zbuf_slot();
+
+    if (i >= 0) {
+        s_zbufs[i].fill = zclear_value();
+        s_zbufs[i].unfilled = 1;
+    }
 }
 
 static int depth_pass(float z, float stored)
@@ -3234,7 +3251,7 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
     if (!surface_begin_batch(T.mem))
         return;
     if (s_gpu.depth_test || s_gpu.depth_mask)
-        T.zb = zbuf_current(1);
+        T.zb = zbuf_current();
     if (tex_size_from_format(s_gpu.texs[0].color)) {
         su = (float)s_gpu.texs[0].width;
         sv = (float)s_gpu.texs[0].height;
