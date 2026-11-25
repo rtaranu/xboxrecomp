@@ -3630,6 +3630,19 @@ int nv2a_batch_transform(uint32_t first, uint32_t count, Nv2aVshOutput *out)
     return 1;
 }
 
+int nv2a_batch_positions(uint32_t first, uint32_t count, float (*out)[4])
+{
+    uint32_t i;
+
+    if (!s_batch_handing_over || first > s_gpu.idx_count
+        || count > s_gpu.idx_count - first)
+        return 0;
+    for (i = 0; i < count; i++)
+        if (!fetch_attr(&s_gpu.attr[0], s_gpu.idx[first + i], out[i]))
+            return 0;
+    return 1;
+}
+
 /* Nonzero: the batch back end drew the batch (nv2a_backend_batch.h). */
 static int batch_backend_draw(void)
 {

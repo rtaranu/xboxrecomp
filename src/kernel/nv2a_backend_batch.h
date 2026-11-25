@@ -151,6 +151,9 @@ int nv2a_backend_register_batches(const Nv2aBatchBackend *backend);
  * Returns 0 if a vertex could not be transformed. */
 int nv2a_batch_transform(uint32_t first, uint32_t count, Nv2aVshOutput *out);
 
+/* As above, for a fixed-function batch's positions before the transform. */
+int nv2a_batch_positions(uint32_t first, uint32_t count, float (*out)[4]);
+
 /* Writes a report: `to` is the host's address of it. */
 void nv2a_batch_report(void *to, uint64_t time, uint32_t pixels);
 

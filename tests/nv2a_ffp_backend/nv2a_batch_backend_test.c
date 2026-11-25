@@ -87,6 +87,7 @@ static struct {
     float inline0[4];
     int transformed;
     Nv2aVshOutput out[4];
+    float from[4][4];
     Nv2aRawClear clear;
     Nv2aTarget clear_target;
     Nv2aRenderState clear_state;
@@ -114,6 +115,8 @@ static int on_draw(const Nv2aRawBatch *b)
         memcpy(s_got.inline0, b->inline_data, sizeof s_got.inline0);
     s_got.transformed = nv2a_batch_transform(0, n, s_got.out);
     CHECK(!nv2a_batch_transform(b->index_count, 1, s_got.out));   /* past the end */
+    CHECK(!nv2a_batch_positions(b->index_count, 1, s_got.from));
+    CHECK(nv2a_batch_positions(0, n, s_got.from));
     return s_got.accept;
 }
 
@@ -212,7 +215,9 @@ static void test_fixed_function(void)
     CHECK(s_got.transformed);
     CHECK(near(s_got.out[0].pos[0], 0) && near(s_got.out[0].pos[1], 8));
     CHECK(near(s_got.out[1].pos[0], 16) && near(s_got.out[2].pos[1], 0));
+    CHECK(near(s_got.from[1][0], 1) && near(s_got.from[1][1], -1) && near(s_got.from[1][3], 1));
     CHECK(!nv2a_batch_transform(0, 1, s_got.out));   /* outside draw() */
+    CHECK(!nv2a_batch_positions(0, 1, s_got.from));
     {
         unsigned i, touched = 0;
         for (i = 0; i < 64 * 8; i++)
