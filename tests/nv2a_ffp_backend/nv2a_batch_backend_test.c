@@ -248,6 +248,65 @@ static void test_texture_matrix(void)
     method(0x1760 + 4 * 10, 2);
 }
 
+/* Coordinates of the normal and the view direction. Vertex 1 is at (1, 1, 1)
+ * before the eye, its normal at (0, 0.6, -0.8). */
+static void test_texture_generation(void)
+{
+    static const float mv[16] = { 0, -1, 0, 0,   1, 0, 0, 0,   0, 0, 1, 1,   0, 0, 0, 1 };
+    static const float inv[16] = { 0, -2, 0, 0,   2, 0, 0, 0,   0, 0, 2, 0 };
+    static const float twice[16] = { 2, 0, 0, 0,   0, 2, 0, 0,   0, 0, 2, 0,   0, 0, 0, 1 };
+    const float *t = s_got.out[1].tex[1];
+    unsigned i;
+
+    for (i = 0; i < 3; i++) {
+        put_float(0x2800 + 12 * i, 0.6f);
+        put_float(0x2804 + 12 * i, 0);
+        put_float(0x2808 + 12 * i, -0.8f);
+        put_float(0x2900 + 8 * i, 7);
+        put_float(0x2904 + 8 * i, 8);
+    }
+    method(0x1720 + 4 * 2, 0x2800);
+    method(0x1760 + 4 * 2, 2u | 3u << 4 | 12u << 8);
+    method(0x1720 + 4 * 10, 0x2900);
+    method(0x1760 + 4 * 10, 2u | 2u << 4 | 8u << 8);
+    for (i = 0; i < 16; i++) {
+        method_float(0x0480 + 4 * i, mv[i]);
+        method_float(0x0580 + 4 * i, inv[i]);
+        method_float(0x06C0 + 64 + 4 * i, twice[i]);
+    }
+    for (i = 0; i < 3; i++)
+        method(0x03D0 + 4 * i, 0x8511);          /* the normal, as long as it is */
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 0) && near(t[1], 1.2f) && near(t[2], -1.6f) && near(t[3], 1));
+    CHECK(near(s_got.out[1].tex[2][0], 0) && near(s_got.out[1].tex[2][2], 0));
+    method(0x03A4, 1);
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 0) && near(t[1], 0.6f) && near(t[2], -0.8f));
+    for (i = 0; i < 3; i++)
+        method(0x03D0 + 4 * i, 0x8512);          /* the view direction, reflected */
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 0.57735f) && near(t[1], 0.71591f) && near(t[2], 0.39260f));
+    method(0x0424, 1);                           /* through the matrix */
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 1.15470f) && near(t[1], 1.43183f) && near(t[2], 0.78520f) && near(t[3], 1));
+    method(0x0424, 0);
+    method(0x03D0, 0);                           /* each for itself */
+    method(0x03D8, 0);
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 7) && near(t[1], 0.71591f) && near(t[2], 0));
+    method(0x03D0, 0x2402);                      /* a sphere map */
+    method(0x03D4, 0x2402);
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 0.67297f) && near(t[1], 0.71449f) && near(t[2], 0));
+    method(0x1760 + 4 * 2, 2);                   /* no normal: the stream's */
+    draw_arrays(5, 0, 3);
+    CHECK(near(t[0], 7) && near(t[1], 8));
+    method(0x03D0, 0);
+    method(0x03D4, 0);
+    method(0x03A4, 0);
+    method(0x1760 + 4 * 10, 2);
+}
+
 /* Lit from behind: nxdk_pgraph_tests' TwoSidedLighting, whose picture from the
  * hardware has the back face's colours within 3 of 255 of these. */
 static void test_two_sided(void)
@@ -597,6 +656,7 @@ int main(void)
     test_registration();
     test_fixed_function();
     test_texture_matrix();
+    test_texture_generation();
     test_two_sided();
     test_points();
     test_textures_and_combiner();
