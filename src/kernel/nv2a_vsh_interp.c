@@ -389,6 +389,7 @@ static void vsh_init_regs(vec4 temp[12], vec4 *opos, float outregs[13][4])
 {
     memset(temp, 0, 12 * sizeof *temp);
     memset(opos, 0, sizeof *opos);
+    opos->v[3] = 1.0f;      /* a program may write x and y alone, then divide by w */
     memset(outregs, 0, 13 * sizeof *outregs);
     outregs[3][3] = outregs[4][3] = 1.0f;      /* colours default opaque */
     outregs[7][3] = outregs[8][3] = 1.0f;      /* a back face's too */
