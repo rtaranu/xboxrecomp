@@ -226,6 +226,28 @@ static void test_fixed_function(void)
     }
 }
 
+/* A texture matrix, row by row, for a stage that has one enabled. */
+static void test_texture_matrix(void)
+{
+    static const float m[16] = { 0, -2, 0, 0.5f,   3, 0, 0, 0.25f,   0, 0, 1, 0,   0, 0, 0, 2 };
+    unsigned i;
+
+    for (i = 0; i < 6; i++)
+        put_float(0x2800 + 4 * i, (float)(i + 1));
+    method(0x1720 + 4 * 10, 0x2800);                /* stage 1: (1, 2), (3, 4), (5, 6) */
+    method(0x1760 + 4 * 10, 2 | (2 << 4) | (8 << 8));
+    for (i = 0; i < 16; i++)
+        method_float(0x06C0 + 64 + 4 * i, m[i]);
+    draw_arrays(5, 0, 3);
+    CHECK(near(s_got.out[1].tex[1][0], 3) && near(s_got.out[1].tex[1][1], 4));
+    method(0x0424, 1);
+    draw_arrays(5, 0, 3);
+    CHECK(near(s_got.out[1].tex[1][0], -7.5f) && near(s_got.out[1].tex[1][1], 9.25f));
+    CHECK(near(s_got.out[1].tex[1][2], 0) && near(s_got.out[1].tex[1][3], 2));
+    method(0x0424, 0);
+    method(0x1760 + 4 * 10, 2);
+}
+
 /* Lit from behind: nxdk_pgraph_tests' TwoSidedLighting, whose picture from the
  * hardware has the back face's colours within 3 of 255 of these. */
 static void test_two_sided(void)
@@ -574,6 +596,7 @@ int main(void)
     configure();
     test_registration();
     test_fixed_function();
+    test_texture_matrix();
     test_two_sided();
     test_points();
     test_textures_and_combiner();
