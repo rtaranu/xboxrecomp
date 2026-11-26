@@ -705,6 +705,9 @@ static uint32_t surface_bpp(void)
  * the sequence. */
 static int s_flip_dumping;
 
+static void (*s_backend_present_sync)(void);
+static int (*s_backend_present)(const Nv2aPresent *p);
+
 static void dump_surface_bmp(void)
 {
     const char *prefix = getenv("RECOMP_FB_DUMP");
@@ -725,6 +728,8 @@ static void dump_surface_bmp(void)
 
     if (!prefix || !w || !h || (bpp != 2 && bpp != 4) || !offset)
         return;
+    if (s_backend_present && s_backend_present_sync)
+        s_backend_present_sync();
 
     row_bytes = w * 3;
     pad = (4 - (row_bytes & 3)) & 3;
@@ -809,12 +814,19 @@ static void surface_apply_clip(void)
 
 static const Nv2aBackend *s_backend;
 static void (*s_backend_present_sync)(void);
+static int (*s_backend_present)(const Nv2aPresent *p);
 
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void))
 {
     s_backend = backend;
     s_backend_present_sync = backend ? present_sync : NULL;
+    s_backend_present = NULL;
+}
+
+void nv2a_backend_set_present(int (*present)(const Nv2aPresent *p))
+{
+    s_backend_present = present;
 }
 
 void nv2a_backend_register(const Nv2aBackend *backend)
@@ -4991,7 +5003,27 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         /* And this is a completed swap, which is what a title's own swap
          * counter counts -- see xbox_Nv2aFrameCounterFlip. */
         xbox_Nv2aFrameCounterFlip();
-        if (s_backend_present_sync)
+        {
+        uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset : s_gpu.color_offset;
+        uint32_t done_pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch : s_gpu.pitch;
+        uint32_t aa_sy = s_gpu.aa_sy > 1.5f ? 2 : 1;
+        int shown = 0;          /* the back end hands the picture over itself */
+
+        if (!s_gpu.pitch)
+            done = 0;
+        if (s_backend_present) {
+            Nv2aPresent p;
+
+            memset(&p, 0, sizeof p);
+            p.va = done ? dma_resolve(done) : 0;
+            p.pitch = done_pitch;
+            p.aa_sy = aa_sy;
+            /* Before this flip arms its hold: the vblank it will be held
+             * until, counted from the flip before. */
+            if (nv2a_pb_exec_flip_pacing())
+                p.has_due = xbox_FlipHoldDue(&s_flip_hold, &p.due);
+            shown = s_backend_present(&p);
+        } else if (s_backend_present_sync)
             s_backend_present_sync();
         /* Hand the window a copy of the frame just finished.
          *
@@ -5007,17 +5039,14 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             xbox_FramebufferWindowFrameStats(s_gpu.draws - draws_at_flip);
             draws_at_flip = s_gpu.draws;
         }
-        if (s_gpu.pitch) {
+        if (done) {
             extern void xbox_FramebufferWindowPresent(uint32_t, uint32_t);
-            uint32_t done = s_gpu.drawn_offset ? s_gpu.drawn_offset
-                                               : s_gpu.color_offset;
-            uint32_t pitch = s_gpu.drawn_offset ? s_gpu.drawn_pitch
-                                                : s_gpu.pitch;
-            if (done) {
-                xbox_FramebufferWindowSet(dma_resolve(done), pitch);
-                xbox_FramebufferWindowSetAA(s_gpu.aa_sy > 1.5f ? 2 : 1);
-                xbox_FramebufferWindowPresent(dma_resolve(done), pitch);
-            }
+
+            xbox_FramebufferWindowSet(dma_resolve(done), done_pitch);
+            xbox_FramebufferWindowSetAA(aa_sy);
+            if (!shown)
+                xbox_FramebufferWindowPresent(dma_resolve(done), done_pitch);
+        }
         }
         {
             /* RECOMP_FB_DUMP_FLIPS: dump every presented frame, not one per

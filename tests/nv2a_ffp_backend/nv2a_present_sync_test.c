@@ -24,7 +24,7 @@ static Nv2aBackendFixture s_backend;
     fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); s_fail = 1; \
 } } while (0)
 
-enum { EVENT_SYNC = 1, EVENT_PRESENT, EVENT_FLIP };
+enum { EVENT_SYNC = 1, EVENT_PRESENT, EVENT_FLIP, EVENT_LATE };
 
 ptrdiff_t xbox_GetMemoryOffset(void) { return (ptrdiff_t)s_mem; }
 uint32_t g_xbox_image_lo, g_xbox_image_hi;
@@ -38,8 +38,10 @@ void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
-uint32_t xbox_VblankCount(void) { return 0; }
-uint64_t xbox_HostNowNs(void) { return 0; }
+static uint32_t s_vblanks;
+static uint64_t s_now_ns;
+uint32_t xbox_VblankCount(void) { return s_vblanks; }
+uint64_t xbox_HostNowNs(void) { return s_now_ns; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 volatile uint32_t *xbox_Nv2aRegPtr(uint32_t offset) { (void)offset; return NULL; }
 
@@ -167,10 +169,70 @@ static void draw_to_first_surface(void)
     method(0x0210, 0x9000);
 }
 
+static uint32_t s_late_va, s_late_pitch, s_late_due;
+static int s_late_answer, s_late_has_due;
+
+static int late_present(const Nv2aPresent *p)
+{
+    CHECK(p->aa_sy == 1);
+    s_late_va = p->va;
+    s_late_pitch = p->pitch;
+    s_late_has_due = p->has_due;
+    s_late_due = p->due;
+    event(EVENT_LATE);
+    return s_late_answer;
+}
+
+extern void nv2a_pb_exec_walk_begin(void);
+extern int nv2a_pb_exec_flip_poll(void);
+
+/* A walk with D3D's swap at interval 1 and its flip, in vblank `vblank`. */
+static void paced_flip(uint32_t vblank)
+{
+    s_vblanks = vblank;
+    s_now_ns += 1000000u;
+    reset_events();
+    s_late_has_due = -1;
+    nv2a_pb_exec_walk_begin();
+    method(0x0100, ((0x005E8000u | 1u) << 5) | 1u);
+    method(0x0130, 0);
+    CHECK(s_event_count == 2 && s_events[0] == EVENT_LATE && s_events[1] == EVENT_FLIP);
+    CHECK(s_late_va == FB_ADDR && s_late_pitch == 4);
+}
+
+/* RECOMP_FLIP_PACING=1: the flip tells the back end the vblank it is due on. */
+static void paced(void)
+{
+    const char *pacing = getenv("RECOMP_FLIP_PACING");
+
+    CHECK(pacing && !strcmp(pacing, "1"));
+    nv2a_backend_register(nv2a_backend_fixture_bind(&s_backend));
+    nv2a_backend_set_present(late_present);
+    s_late_answer = 1;
+    paced_flip(100);                    /* the first: nothing to count from */
+    CHECK(s_late_has_due == 0);
+    CHECK(!nv2a_pb_exec_flip_poll());
+    paced_flip(100);                    /* in the same vblank: held to 101 */
+    CHECK(s_late_has_due == 1 && s_late_due == 101);
+    CHECK(nv2a_pb_exec_flip_poll());
+    s_vblanks = 101;
+    CHECK(!nv2a_pb_exec_flip_poll());
+    paced_flip(101);
+    CHECK(s_late_has_due == 1 && s_late_due == 102);
+    s_vblanks = 102;
+    CHECK(!nv2a_pb_exec_flip_poll());
+    paced_flip(105);                    /* late: its vblank has passed */
+    CHECK(s_late_has_due == 1 && s_late_due == 103);
+    CHECK(!nv2a_pb_exec_flip_poll());
+    paced_flip(105);                    /* and the next counts from there */
+    CHECK(s_late_has_due == 1 && s_late_due == 106);
+    nv2a_backend_register(NULL);
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
-        fprintf(stderr, "expected the framebuffer dump prefix\n");
+        fprintf(stderr, "expected the framebuffer dump prefix, or `paced`\n");
         return 2;
     }
     nv2a_backend_fixture_init(&s_backend);
@@ -180,6 +242,12 @@ int main(int argc, char **argv)
     method(0x0204, 1u << 16);
     method(0x020C, 4);
     method(0x0210, FB_ADDR);
+    if (!strcmp(argv[1], "paced")) {
+        paced();
+        if (!s_fail)
+            puts("PASS");
+        return s_fail;
+    }
 
     reset_events();
     write_pixel(OLD_PIXEL);
@@ -225,11 +293,33 @@ int main(int argc, char **argv)
     CHECK(s_event_count == 2 && s_events[0] == EVENT_PRESENT && s_events[1] == EVENT_FLIP);
     CHECK(s_present_count == 1 && s_presented[0] == OLD_PIXEL);
 
+    /* The back end shows the picture itself, or leaves it to guest memory. A
+     * dump asks for the sync. */
+    nv2a_backend_register_with_present_sync(
+        nv2a_backend_fixture_bind(&s_backend),
+        nv2a_backend_fixture_present_sync);
+    nv2a_backend_set_present(late_present);
+    reset_events();
+    write_pixel(OLD_PIXEL);
+    s_late_answer = 1;
+    flip_and_check_dump(argv[1], 5, NEW_PIXEL);
+    CHECK(s_event_count == 3 && s_events[0] == EVENT_LATE &&
+          s_events[1] == EVENT_SYNC && s_events[2] == EVENT_FLIP);
+    CHECK(s_present_count == 0 && s_late_va == FB_ADDR && s_late_pitch == 4);
+    CHECK(s_late_has_due == 0);         /* no flip pacing: at once */
+    reset_events();
+    write_pixel(OLD_PIXEL);
+    s_late_answer = 0;
+    flip_and_check_dump(argv[1], 6, NEW_PIXEL);
+    CHECK(s_event_count == 4 && s_events[0] == EVENT_LATE && s_events[1] == EVENT_PRESENT &&
+          s_events[2] == EVENT_SYNC && s_events[3] == EVENT_FLIP);
+    CHECK(s_present_count == 1 && s_presented[0] == OLD_PIXEL);
+
     nv2a_backend_register_with_present_sync(
         NULL, nv2a_backend_fixture_present_sync);
     reset_events();
     write_pixel(OLD_PIXEL);
-    flip_and_check_dump(argv[1], 5, OLD_PIXEL);
+    flip_and_check_dump(argv[1], 7, OLD_PIXEL);
     CHECK(s_event_count == 1 && s_events[0] == EVENT_PRESENT);
     CHECK(s_present_count == 1 && s_presented[0] == OLD_PIXEL);
 
@@ -239,7 +329,7 @@ int main(int argc, char **argv)
     nv2a_backend_register(NULL);
     reset_events();
     write_pixel(OLD_PIXEL);
-    flip_and_check_dump(argv[1], 6, OLD_PIXEL);
+    flip_and_check_dump(argv[1], 8, OLD_PIXEL);
     CHECK(s_event_count == 1 && s_events[0] == EVENT_PRESENT);
     CHECK(s_present_count == 1 && s_presented[0] == OLD_PIXEL);
     CHECK(s_backend.thread_mismatches == 0 && s_backend.dropped_events == 0);

@@ -112,6 +112,30 @@ void nv2a_backend_register(const Nv2aBackend *backend);
 void nv2a_backend_register_with_present_sync(const Nv2aBackend *backend,
                                              void (*present_sync)(void));
 
+/* What a flip hands a back end that shows the picture itself. The executor
+ * fills it and may add fields at the end; it is good for the call only. */
+typedef struct Nv2aPresent {
+    uint32_t va;        /* the surface to show; 0: none */
+    uint32_t pitch;
+    uint32_t aa_sy;     /* its vertical anti-aliasing factor, 1 or 2 */
+    /* RECOMP_FLIP_PACING: the vblank (xbox_VblankCount) the flip is due on,
+     * see xbox_FlipHoldDue. The picture belongs on that vblank, or at once
+     * when the count has reached it. has_due 0: show it at once (pacing off,
+     * the first flip, IMMEDIATE, the edge rule). */
+    int      has_due;
+    uint32_t due;
+} Nv2aPresent;
+
+/* For a back end that has the picture itself and does not wait for the GPU at
+ * a flip. `present` is called at each flip instead of present_sync. Nonzero:
+ * the back end shows the picture itself (xbox_FramebufferWindowSetExternal),
+ * and guest memory may lack it. 0: guest memory has it, and the window takes
+ * its copy there. Called on the executor thread, like present_sync, and
+ * returns without waiting for the vblank: the wait is the back end's own.
+ * present_sync is then called before a framebuffer dump instead, to put what
+ * was drawn into guest memory. NULL removes it, and so does registering. */
+void nv2a_backend_set_present(int (*present)(const Nv2aPresent *p));
+
 /* Decode a whole texture to 0xAARRGGBB, row-major, width*height entries.
  * Handles every format the executor can sample (swizzled, linear, DXT).
  * Returns 0 if the format is not supported. */

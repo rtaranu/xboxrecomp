@@ -35,6 +35,10 @@ add_test(NAME nv2a-present-sync COMMAND nv2a-present-sync-test
          "${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
 set_tests_properties(nv2a-present-sync PROPERTIES ENVIRONMENT
     "RECOMP_FB_DUMP_FLIPS=1;RECOMP_FB_DUMP=${CMAKE_CURRENT_BINARY_DIR}/nv2a-present-sync-")
+# With flip pacing the flip tells a back end that shows the picture itself the vblank it is
+# due on; the test above checks that it names none without.
+add_test(NAME nv2a-present-due COMMAND nv2a-present-sync-test paced)
+set_tests_properties(nv2a-present-due PROPERTIES ENVIRONMENT "RECOMP_FLIP_PACING=1")
 # Triangle strips alternate their winding only with RECOMP_STRIP_ALT_WINDING; the same test
 # checks the unchanged order without it (the test above) and the swapped one with it.
 add_test(NAME nv2a-ffp-backend-strip-winding COMMAND nv2a-ffp-backend-test)
