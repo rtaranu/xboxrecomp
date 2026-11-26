@@ -4847,6 +4847,45 @@ static int shown_main(void)
     return s_fail;
 }
 
+/* RECOMP_NV2A_VK_PRESENT=late: the window's copy is one flip behind (two
+ * frames in flight), and no flip waits for the GPU. */
+static int late_main(void)
+{
+    Nv2aVkStats was, st;
+    unsigned i;
+
+    nv2a_pb_exec_set_resolver(offset_va);
+    if (!memory_init() || !nv2a_vk_init()) {
+        puts("no Vulkan here: skipped");
+        return 77;
+    }
+    setup();
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+    main_surface();
+    rect(0, 0, 8, 8, 0xFF101010u);
+    flip();
+    nv2a_vk_stats(&was);
+    for (i = 1; i <= 5; i++) {
+        rect(0, 0, 8, 8, 0xFF000000u | i);
+        flip();
+        CHECK(s_windowed == 1 + i);
+        CHECK(pixel(3, 3) == (i == 1 ? 0xFF101010u : 0xFF000000u | (i - 1)));
+    }
+    nv2a_vk_stats(&st);
+    CHECK(st.flushes == was.flushes && st.readbacks - was.readbacks == 5);
+    nv2a_vk_store();                            /* drawn since its copy: still dirty */
+    CHECK(pixel(3, 3) == 0xFF000005u);
+    rect(0, 0, 8, 8, 0xFF000006u);
+    flip();
+    flip();                                     /* nothing drawn: the same picture */
+    flip();
+    CHECK(pixel(3, 3) == 0xFF000006u && s_windowed == 9);
+    CHECK(s_external == -1 && !nv2a_vk_present_on());
+    if (!s_fail)
+        puts("NV2A Vulkan, the window shows the picture a flip late: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     Nv2aVkStats st;
@@ -4855,6 +4894,8 @@ int main(int argc, char **argv)
         return shows_main();
     if (argc > 1 && strcmp(argv[1], "shown") == 0)
         return shown_main();
+    if (argc > 1 && strcmp(argv[1], "late") == 0)
+        return late_main();
 #if defined(_WIN32)
     if (argc > 1 && strcmp(argv[1], "present") == 0)
         return present_main();

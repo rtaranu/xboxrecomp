@@ -33,6 +33,9 @@ if(XBOXRECOMP_NV2A_VK)
     add_test(NAME nv2a-vk-window-shown COMMAND nv2a-vk-draw-test shown)
     set_tests_properties(nv2a-vk-window-shown PROPERTIES SKIP_RETURN_CODE 77
         ENVIRONMENT "RECOMP_NV2A_VK_PRESENT=shown;RECOMP_NV2A_VK_PIPELINE_CACHE=0")
+    add_test(NAME nv2a-vk-window-late COMMAND nv2a-vk-draw-test late)
+    set_tests_properties(nv2a-vk-window-late PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "RECOMP_NV2A_VK_PRESENT=late;RECOMP_NV2A_VK_PIPELINE_CACHE=0")
     if(WIN32)                           # opens a window, off the screen
         add_test(NAME nv2a-vk-present COMMAND nv2a-vk-draw-test present)
         set_tests_properties(nv2a-vk-present PROPERTIES SKIP_RETURN_CODE 77)

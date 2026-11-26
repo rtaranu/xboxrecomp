@@ -187,6 +187,15 @@ typedef struct {
     int submitted;              /* all of it */
     Retired *retired;
     uint32_t retired_count, retired_room;
+    /* RECOMP_NV2A_VK_PRESENT=late: the shown surface, copied at its flip */
+    VkBuffer late;
+    VkDeviceMemory late_mem;
+    uint8_t *late_map;
+    VkDeviceSize late_bytes;
+    int late_coherent;
+    uint32_t late_serial, late_version; /* the picture copied; serial 0: none */
+    uint64_t late_flip;
+    int late_done;                      /* the GPU is past the copy */
 } Frame;
 
 static struct {
@@ -859,6 +868,7 @@ static void frame_wait(Frame *f)
         vkResetFences(g.dev, 1, &f->fence);
         frame_clock(f);
         f->submitted = 0;
+        f->late_done = f->late_serial != 0;
     }
     f->used = 0;
     f->open = 0;
@@ -5386,9 +5396,106 @@ static void vk_idle(void)
 /* RECOMP_NV2A_VK_PRESENT set: the toolkit's window shows the picture from guest
  * memory, whatever the copy-back mode. For timing Vulkan's present against a
  * back end without one. At each flip, 0: everything drawn goes there, waiting
- * for the GPU. shown: the shown surface only, waiting. */
-enum { WINDOW_OFF, WINDOW_ALL, WINDOW_SHOWN };
+ * for the GPU. shown: the shown surface only, waiting. late: the shown surface
+ * is copied in the frame's own commands and goes there at a later flip, once
+ * the GPU is past it: one flip late with two frames in flight. */
+enum { WINDOW_OFF, WINDOW_ALL, WINDOW_SHOWN, WINDOW_LATE };
 static int s_window_shows;
+
+/* late: the surface shown, into this frame's buffer. 0: none drawn since it was
+ * last stored, or no room. */
+static int late_copy(uint32_t va, uint32_t pitch, uint64_t bytes)
+{
+    VkMemoryBarrier2 mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+    VkDependencyInfo di = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    Frame *f = g.f;
+    Surface *s = NULL;
+    VkDeviceSize need;
+    uint32_t i;
+
+    for (i = 0; i < MAX_SURFACES; i++) {
+        Surface *q = &s_surfaces[i];
+
+        if (q->used && q->dirty && !q->swizzled && q->va == va && q->pitch == pitch
+            && pitch == q->w * q->bpp)
+            s = q;
+    }
+    if (!s || g.lost)
+        return 0;
+    store_range(va, bytes, s);                  /* anything else over it, at once */
+    need = (VkDeviceSize)s->w * s->h * s->bpp;
+    if (need > f->late_bytes) {                 /* the GPU is past this frame's last */
+        if (f->late) {
+            vkDestroyBuffer(g.dev, f->late, NULL);
+            vkFreeMemory(g.dev, f->late_mem, NULL);
+            f->late = VK_NULL_HANDLE;
+            f->late_bytes = 0;
+        }
+        if (!create_readback(need, &f->late, &f->late_mem, &f->late_map, &f->late_coherent))
+            return 0;
+        f->late_bytes = need;
+    }
+    end_rendering();
+    begin_recording();
+    surface_get(s, f->late, 0);
+    mb.srcStageMask = TRANSFER;
+    mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    di.memoryBarrierCount = 1;
+    di.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(g.cmd, &di);
+    f->late_serial = s->serial;
+    f->late_version = s->version;
+    f->late_flip = g.frame;
+    f->late_done = 0;
+    return 1;
+}
+
+/* late: the copies the GPU is past, into guest memory, the oldest first. A
+ * surface drawn into since its copy stays dirty: the card's is newer. */
+static void late_store(void)
+{
+    for (;;) {
+        Frame *f = NULL;
+        uint32_t i;
+
+        for (i = 0; i < g.frame_count; i++) {
+            Frame *q = &g.frames[i];
+
+            if (q->late_serial && q->late_done && (!f || q->late_flip < f->late_flip))
+                f = q;
+        }
+        if (!f)
+            return;
+        for (i = 0; i < MAX_SURFACES; i++) {
+            Surface *s = &s_surfaces[i];
+            double from;
+            int drawn;
+
+            if (!s->used || s->serial != f->late_serial)
+                continue;                       /* dropped, and stored then */
+            from = now_ms();
+            drawn = s->version != f->late_version;
+            if (!f->late_coherent) {
+                VkMappedMemoryRange r = { VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE };
+                r.memory = f->late_mem;
+                r.size = VK_WHOLE_SIZE;
+                vkInvalidateMappedMemoryRanges(g.dev, 1, &r);
+            }
+            surface_store(s, f->late_map);
+            if (drawn) {
+                s->dirty = 1;
+                surface_watch(s);
+            }
+            s_stats.readbacks++;
+            s_stats.readback_ms += now_ms() - from;
+            break;
+        }
+        f->late_serial = 0;
+        f->late_done = 0;
+    }
+}
 
 static int vk_present(const Nv2aPresent *p)
 {
@@ -5402,10 +5509,12 @@ static int vk_present(const Nv2aPresent *p)
         } else if (s_window_shows == WINDOW_ALL) {
             store_range(0, 0x100000000ull, NULL);
             flush();
-        } else if (p->va) {
+        } else if (p->va && (s_window_shows == WINDOW_SHOWN
+                             || !late_copy(p->va, p->pitch, bytes))) {
             store_range(p->va, bytes, NULL);
         }
         present(&none);
+        late_store();
         leave();
         return 0;
     }
@@ -5903,9 +6012,10 @@ int nv2a_vk_init(void)
     cache_open();
     e = getenv("RECOMP_NV2A_VK_PRESENT");
     s_window_shows = !e ? WINDOW_OFF : strcmp(e, "0") == 0 ? WINDOW_ALL
-                   : strcmp(e, "shown") == 0 ? WINDOW_SHOWN : WINDOW_OFF;
+                   : strcmp(e, "shown") == 0 ? WINDOW_SHOWN
+                   : strcmp(e, "late") == 0 ? WINDOW_LATE : WINDOW_OFF;
     if (e && !s_window_shows)
-        fprintf(stderr, "[NV2A-VK] no RECOMP_NV2A_VK_PRESENT=%s: 0 or shown\n", e);
+        fprintf(stderr, "[NV2A-VK] no RECOMP_NV2A_VK_PRESENT=%s: 0, shown or late\n", e);
     if (s_window_shows)
         fprintf(stderr, "[NV2A-VK] RECOMP_NV2A_VK_PRESENT=%s: the window shows guest memory\n",
                 e);
