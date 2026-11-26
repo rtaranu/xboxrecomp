@@ -2,14 +2,16 @@
  * Draws a captured frame again, offline, with the executor's own code
  * (RECOMP_FRAME_CAPTURE, src/kernel/nv2a_capture.c).
  *
- *   nv2a-replay <file.nvcap> [--mode draw|transform|walk] [--repeat N]
+ *   nv2a-replay <file.nvcap> [--mode draw|vulkan|transform|walk] [--repeat N]
  *               [--bmp out.bmp] [--raw out.bin] [--expect in.bin]
  *
  * --mode says how far the executor goes, and so where its time goes:
  *   walk       every command, no vertices (a batch back end takes each batch)
  *   transform  the same, and every vertex is transformed on the CPU
  *   draw       everything: the CPU rasteriser, into the replay's own memory
- * The time printed covers the commands, not the copying of saved memory.
+ *   vulkan     everything: the Vulkan rasteriser (built with XBOXRECOMP_NV2A_VK)
+ * The time printed covers the commands, not the copying of saved memory; the
+ * mean is over all passes but the first two.
  *
  * --bmp and --raw write the frame shown by the last flip; --expect compares it
  * with a --raw file and fails if a pixel differs.
@@ -24,6 +26,9 @@
 #include "nv2a_backend_batch.h"
 #include "nv2a_capture.h"
 #include "nv2a_perf.h"
+#if defined(XBOXRECOMP_NV2A_VK)
+#include "nv2a_vk.h"
+#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -112,7 +117,6 @@ void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
 void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
-uint64_t xbox_HostNowNs(void) { return 0; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 void xbox_RegisterTitleEvent(uint32_t guest_va) { (void)guest_va; }
 void xbox_SetTitleEvent(uint32_t guest_va) { (void)guest_va; }
@@ -230,19 +234,22 @@ static int load(const char *path)
     return 1;
 }
 
-static double now_ms(void)
+void xbox_HostSleepNs(uint64_t ns) { (void)ns; }
+uint64_t xbox_HostNowNs(void)
 {
 #if defined(_WIN32)
     LARGE_INTEGER c, f;
     QueryPerformanceCounter(&c);
     QueryPerformanceFrequency(&f);
-    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
+    return (uint64_t)((double)c.QuadPart * 1e9 / (double)f.QuadPart);
 #else
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
-    return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
+    return (uint64_t)t.tv_sec * 1000000000u + (uint64_t)t.tv_nsec;
 #endif
 }
+
+static double now_ms(void) { return (double)xbox_HostNowNs() / 1e6; }
 
 /* The words from here on that are for this method, as the walker finds them. */
 static uint32_t run(size_t at, uint32_t method, uint32_t *p, uint32_t most, size_t *next)
@@ -344,7 +351,7 @@ int main(int argc, char **argv)
     const char *path = NULL, *mode = "draw", *bmp = NULL, *raw = NULL, *expect = NULL;
     int repeat = 1, i, status = 0;
     uint32_t words = 0, h;
-    double best = 0.0;
+    double best = 0.0, sum = 0.0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--mode") && i + 1 < argc) mode = argv[++i];
@@ -356,8 +363,8 @@ int main(int argc, char **argv)
         else path = "";
     }
     if (!path || !*path || (strcmp(mode, "draw") && strcmp(mode, "transform")
-                            && strcmp(mode, "walk"))) {
-        fprintf(stderr, "usage: nv2a-replay <file.nvcap> [--mode draw|transform|walk]"
+                            && strcmp(mode, "vulkan") && strcmp(mode, "walk"))) {
+        fprintf(stderr, "usage: nv2a-replay <file.nvcap> [--mode draw|vulkan|transform|walk]"
                         " [--repeat N]\n                   [--bmp out.bmp] [--raw out.bin]"
                         " [--expect in.bin]\n");
         return 2;
@@ -366,7 +373,15 @@ int main(int argc, char **argv)
         fprintf(stderr, "cannot read %s\n", path);
         return 2;
     }
-    if (strcmp(mode, "draw")) {
+    if (!strcmp(mode, "vulkan")) {
+#if defined(XBOXRECOMP_NV2A_VK)
+        if (!nv2a_vk_init())
+            return 77;                  /* no Vulkan here: a skipped test */
+#else
+        fprintf(stderr, "built without XBOXRECOMP_NV2A_VK\n");
+        return 77;
+#endif
+    } else if (strcmp(mode, "draw")) {
         s_transform = !strcmp(mode, "transform");
         nv2a_backend_register_batches(&s_taker);
     }
@@ -376,9 +391,26 @@ int main(int argc, char **argv)
         printf("%s pass %d: %.2f ms\n", mode, i + 1, ms);
         if (i == 0 || ms < best)
             best = ms;
+        if (i > 1)
+            sum += ms;
     }
-    printf("%s: best %.2f ms, %u words, %u flips", mode, best, words, s_flips);
-    if (strcmp(mode, "draw"))
+#if defined(XBOXRECOMP_NV2A_VK)
+    if (!strcmp(mode, "vulkan")) {
+        double from = now_ms();
+        Nv2aVkStats st;
+
+        nv2a_vk_wait();
+        sum += now_ms() - from;
+        nv2a_vk_stats(&st);
+        printf("vulkan: a pass: %.1f waits, %.1f surfaces back\n",
+               (double)st.flushes / repeat, (double)st.readbacks / repeat);
+    }
+#endif
+    printf("%s: best %.2f ms, ", mode, best);
+    if (repeat > 2)
+        printf("mean %.2f ms, ", sum / (repeat - 2));
+    printf("%u words, %u flips", words, s_flips);
+    if (strcmp(mode, "draw") && strcmp(mode, "vulkan"))
         printf(", %u batches, %u vertices", s_batches, s_vertices);
     printf("\n");
     h = shown_height();

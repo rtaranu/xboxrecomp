@@ -19,3 +19,8 @@ if(MSVC)
 elseif(NOT WIN32)
     target_link_libraries(nv2a-replay PRIVATE m pthread)
 endif()
+# -DXBOXRECOMP_NV2A_VK=ON adds --mode vulkan.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../src/nv2a_vk/nv2a_vk.cmake)
+if(XBOXRECOMP_NV2A_VK)
+    nv2a_vk_add_to(nv2a-replay)
+endif()
