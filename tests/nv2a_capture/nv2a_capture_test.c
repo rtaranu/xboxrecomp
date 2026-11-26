@@ -5,7 +5,8 @@
  * The frame leans on what a capture can lose: state set long before it, a
  * swizzled texture whose size comes from the format word, a vertex buffer the
  * title rewrites between two draws, vertices sent in the commands, a texture
- * the frame drew itself.
+ * the frame drew itself. The capture is taken with draws off, as under a host
+ * renderer, after the same frame was drawn for comparison.
  *
  *   nv2a-capture-test <prefix>: <prefix>-0.nvcap and <prefix>.raw
  */
@@ -205,6 +206,10 @@ int main(int argc, char **argv)
     frame(0);
     frame(2);
     memcpy(drawn, s_mem + COLOR_AT, sizeof drawn);
+    /* What a host renderer would leave: nothing, where the targets are. */
+    memset(s_mem + COLOR_AT, 0x5A, W * H * 4);
+    memset(s_mem + SMALL_AT, 0x5A, 16 * 16 * 4);
+    nv2a_pb_set_draws_off(1);
     snprintf(go, sizeof go, "%s.go", argv[1]);
     f = fopen(go, "wb");
     if (!f)
