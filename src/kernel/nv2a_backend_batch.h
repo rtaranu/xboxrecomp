@@ -28,7 +28,7 @@
 #include "nv2a_vsh_interp.h"
 
 /* Goes up with every change to the structures below. */
-#define NV2A_BATCH_VERSION 2u
+#define NV2A_BATCH_VERSION 3u
 
 /* What is being drawn into. Unlike Nv2aSurface's, the fields needed to find a
  * pixel in memory are all here. */
@@ -137,6 +137,10 @@ typedef struct {
     void (*report_clear)(void);
     int (*report)(const Nv2aReport *r);
     void (*idle)(void);
+    /* The title freed contiguous memory: whatever the back end keeps by these
+     * guest addresses (textures, surfaces) is no longer what is there. Called
+     * on the thread that freed it, any thread, while others may be drawing. */
+    void (*memory_freed)(uint32_t va, uint32_t bytes);
 } Nv2aBatchBackend;
 
 /* Register (or, with NULL, remove) the back end; as nv2a_backend_register, to

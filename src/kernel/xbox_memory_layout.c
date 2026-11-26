@@ -4343,6 +4343,10 @@ int xbox_ContiguousFree(uint32_t va)
     g_contig_frees++;
     contig_report("free", va, n);
     contig_unlock();
+    {
+        extern void nv2a_pb_exec_memory_freed(uint32_t va, uint32_t bytes);
+        nv2a_pb_exec_memory_freed(va, n * CONTIG_PAGE);
+    }
     return 1;
 }
 

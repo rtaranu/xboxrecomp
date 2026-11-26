@@ -860,6 +860,15 @@ void nv2a_pb_exec_idle(void)
         s_batch_backend->idle();
 }
 
+/* From the allocator, on the thread that freed the block. */
+void nv2a_pb_exec_memory_freed(uint32_t va, uint32_t bytes)
+{
+    const Nv2aBatchBackend *b = s_batch_backend;
+
+    if (b && b->memory_freed)
+        b->memory_freed(va, bytes);
+}
+
 /* The fewest vertices worth drawing: the triangle paths need three, a batch
  * back end is handed points and lines as well. */
 static uint32_t min_batch_vertices(void)

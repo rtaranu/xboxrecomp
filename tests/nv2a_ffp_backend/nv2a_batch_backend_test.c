@@ -143,8 +143,18 @@ static int on_report(const Nv2aReport *r)
 
 static void on_idle(void) { s_rep.idles++; }
 
+static struct { int calls; uint32_t va, bytes; } s_freed;
+
+static void on_memory_freed(uint32_t va, uint32_t bytes)
+{
+    s_freed.calls++;
+    s_freed.va = va;
+    s_freed.bytes = bytes;
+}
+
 static const Nv2aBatchBackend s_ours = {
-    NV2A_BATCH_VERSION, on_draw, on_clear, on_report_clear, on_report, on_idle
+    NV2A_BATCH_VERSION, on_draw, on_clear, on_report_clear, on_report, on_idle,
+    on_memory_freed
 };
 
 /* A 16x8 surface, positions at 0x2000 (float4 x 3) under an orthographic
@@ -499,6 +509,18 @@ static void test_clear(void)
 }
 
 extern void nv2a_pb_exec_idle(void);
+extern void nv2a_pb_exec_memory_freed(uint32_t va, uint32_t bytes);
+
+/* A freed block is passed on as it is, and to nobody once unregistered. */
+static void test_memory_freed(void)
+{
+    nv2a_pb_exec_memory_freed(0x80123000u, 0x4000u);
+    CHECK(s_freed.calls == 1 && s_freed.va == 0x80123000u && s_freed.bytes == 0x4000u);
+    nv2a_backend_register_batches(NULL);
+    nv2a_pb_exec_memory_freed(0x80123000u, 0x4000u);
+    CHECK(s_freed.calls == 1);
+    CHECK(nv2a_backend_register_batches(&s_ours));
+}
 
 /* A report is the back end's to write, or the executor's. */
 static void test_reports(void)
@@ -663,6 +685,7 @@ int main(void)
     test_inline_and_immediate();
     test_program();
     test_clear();
+    test_memory_freed();
     test_reports();
     test_own_depth();
     test_refusal_and_removal();
