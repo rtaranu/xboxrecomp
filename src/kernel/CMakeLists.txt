@@ -37,6 +37,13 @@ set(KERNEL_SOURCES
 
 add_library(xbox_kernel STATIC ${KERNEL_SOURCES})
 
+# The Vulkan rasteriser for the pushbuffer executor (src/nv2a_vk), off by
+# default. Needs only the Vulkan headers; the loader is opened at run time.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../nv2a_vk/nv2a_vk.cmake)
+if(XBOXRECOMP_NV2A_VK)
+    nv2a_vk_add_to(xbox_kernel)
+endif()
+
 # See src/platform/CMakeLists.txt: resolve src/ relative to this file, not via
 # CMAKE_SOURCE_DIR, which is the consuming project's root under add_subdirectory().
 get_filename_component(XBOXRECOMP_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
