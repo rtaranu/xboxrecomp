@@ -41,6 +41,8 @@ static int offset_va(uint32_t pa, uint32_t *va)
     *va = pa - 0x01000000u;
     return 1;
 }
+int xbox_mem2_phys_to_guest(uint32_t pa, uint32_t *va) { (void)pa; (void)va; return 0; }
+int xbox_mem2_arena_has(uint32_t va, uint32_t bytes) { (void)va; (void)bytes; return 0; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
 void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }

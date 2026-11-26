@@ -38,6 +38,8 @@
 #include "nv2a_vk_vtx.h"
 #include "nv2a_vk_spirv.h"
 
+extern int xbox_mem2_arena_has(uint32_t va, uint32_t bytes);
+
 #define SLOTS_2D   8192u
 #define SLOTS_3D   512u
 #define SLOTS_CUBE 1024u
@@ -988,6 +990,8 @@ static int guest_span_ok(uint64_t va, uint64_t bytes)
     if (!va || !bytes || bytes > 0x10000000u)
         return 0;
     if (end <= (uint64_t)XBOX_CONTIG_SIZE)
+        return 1;
+    if (va <= 0xFFFFFFFFu && xbox_mem2_arena_has((uint32_t)va, (uint32_t)bytes))
         return 1;
     return va >= XBOX_CONTIG_BASE && end <= (uint64_t)XBOX_CONTIG_BASE + XBOX_CONTIG_SIZE;
 }

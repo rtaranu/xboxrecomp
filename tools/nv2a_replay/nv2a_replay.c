@@ -102,6 +102,10 @@ static int captured_va(uint32_t pa, uint32_t *va)
     }
     return 0;
 }
+/* Memory model 2: not used, the resolver above answers first; any address a
+ * capture names is guest memory. */
+int xbox_mem2_phys_to_guest(uint32_t pa, uint32_t *va) { (void)pa; (void)va; return 0; }
+int xbox_mem2_arena_has(uint32_t va, uint32_t bytes) { (void)va; (void)bytes; return 1; }
 void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch)
 {
     s_shown_va = va;
