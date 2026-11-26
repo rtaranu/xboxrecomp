@@ -47,6 +47,20 @@ int nv2a_pb_exec_constant_word(uint32_t method, uint32_t param)
     (void)method; (void)param;
     return 0;
 }
+/* Indices come in runs: their words, added up by place. */
+static uint32_t s_runs, s_run_words, s_run_sum;
+int nv2a_pb_exec_run(uint32_t method, const uint32_t *p, uint32_t n)
+{
+    uint32_t i;
+
+    if (method != 0x1800)
+        return 0;
+    for (i = 0; i < n; i++)
+        s_run_sum += p[i] * (s_run_words + i + 1);
+    s_run_words += n;
+    s_runs++;
+    return 1;
+}
 void nv2a_pb_exec_report(void) {}
 void xbox_Nv2aAckBusyBits(void) {}
 void nv2a_pb_exec_walk_begin(void) {}
@@ -160,6 +174,35 @@ int main(void)
         put(last + 8, (ring + 0x200u) | 1u);               /* JUMP past PUT */
         CHECK(nv2a_pb_scan_wrap(last, ring + 8) == 0);
         CHECK(s_n == n0);
+    }
+
+    /* A non-increasing method's words go to the executor in runs, all of them
+     * and in order, up to the segment's end; then the next method. One word
+     * alone, an increasing method's and another subchannel's go one by one. */
+    {
+        const uint32_t seg = WINDOW_END - 0x4000u;
+        uint32_t i, sum = 0;
+        int n0 = s_n;
+
+        put(seg, 0x40000000u | hdr(300, 0, 0x1800));
+        for (i = 0; i < 300; i++) {
+            put(seg + 4 + 4 * i, i * 7 + 3);
+            sum += (i * 7 + 3) * (i + 1);
+        }
+        put(seg + 1204, hdr(1, 0, 0x17FC)); put(seg + 1208, 0);
+        nv2a_pb_scan_segment(seg, seg + 1212);
+        CHECK(s_run_words == 300 && s_run_sum == sum && s_runs == 3 && s_n == n0 + 1);
+        CHECK(s_last_method == 0x17FC);
+        s_run_words = s_run_sum = 0;
+        nv2a_pb_scan_segment(seg, seg + 4 + 4 * 130);
+        CHECK(s_run_words == 130 && s_n == n0 + 1);
+        put(seg, 0x40000000u | hdr(1, 0, 0x1800));
+        nv2a_pb_scan_segment(seg, seg + 8);
+        put(seg, hdr(2, 0, 0x1800));
+        nv2a_pb_scan_segment(seg, seg + 12);
+        put(seg, 0x40000000u | hdr(2, 1, 0x1800));
+        nv2a_pb_scan_segment(seg, seg + 12);
+        CHECK(s_run_words == 130 && s_n == n0 + 6 && s_last_param == 10);
     }
 
     if (!s_fail)
