@@ -16,6 +16,7 @@
 #include "nv2a_perf.h"
 #include "nv2a_vk.h"
 #include "nv2a_vk_pipeline_cache.h"
+#include "nv2a_vk_present.h"
 #include "../d3d/d3d8_swizzle.h"
 #if defined(_WIN32)
 #include <windows.h>
@@ -81,7 +82,31 @@ void xbox_Nv2aFrameCounterFlip(void) {}
 int nv2a_pb_scan_in_call(void) { return 0; }
 static volatile unsigned s_vblanks;
 uint32_t xbox_VblankCount(void) { return s_vblanks; }
+static int s_wide;
+int xbox_DisplayIsWide(void) { return s_wide; }
 void xbox_HostSleepNs(uint64_t ns) { (void)ns; Sleep(1); }
+static void *s_window;
+static int s_external = -1;
+void *xbox_FramebufferWindowHandle(void) { return s_window; }
+void xbox_FramebufferWindowSetExternal(int on) { s_external = on; }
+/* The video overlay: a rectangle over what has the key's colour. */
+static volatile int s_overlay;
+static volatile unsigned s_overlaid;
+static uint32_t s_under[640 * 480], s_over_color;
+int xbox_FramebufferOverlayState(void) { return s_overlay == 3 ? 2 : s_overlay; }
+void xbox_FramebufferOverlay(uint32_t *rgb)
+{
+    uint32_t x, y;
+
+    memcpy(s_under, rgb, sizeof s_under);
+    if (s_overlay == 2 || s_overlay == 1)
+        for (y = 8; y < 300; y++)
+            for (x = 16; x < 320; x++)
+                if ((rgb[y * 640 + x] & 0xFFFFFFu) != 0x102030)
+                    rgb[y * 640 + x] = s_over_color;
+    s_overlay = s_overlay == 3 ? 0 : 1;         /* 3: it ends; else as it was */
+    s_overlaid++;
+}
 static uint64_t s_clock;
 uint64_t xbox_HostNowNs(void) { return s_clock += 1000; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
@@ -3044,6 +3069,220 @@ static void test_drawn(void)
     pass(4);
 }
 
+/* ---- flips that do not wait (RECOMP_NV2A_VK_COPYBACK=never) ------------- */
+
+/* Everything drawn into guest memory, whatever the mode. */
+static void all_back(void)
+{
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
+    main_surface();
+    flip();
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+}
+
+/* The picture does not go to guest memory, nor the window there for it. */
+static void test_late_picture(void)
+{
+    unsigned i;
+
+    clear(0xFF101010u);
+    flip();
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+    nv2a_vk_wait();
+    mark();
+    for (i = 1; i <= 20; i++) {
+        rect(0, 0, 8, 8, 0xFF000000u | i);
+        flip();
+    }
+    CHECK(waited_for(0) && s_windowed == 0);
+    nv2a_vk_wait();
+    CHECK(pixel(3, 3) == 0xFF101010u);           /* not copied back */
+
+    /* The next frame goes on from it. */
+    rect(10, 0, 18, 8, 0xFF00FF00u);
+    flip();
+    all_back();
+    CHECK(pixel(3, 3) == 0xFF000014u && pixel(12, 3) == 0xFF00FF00u);
+    CHECK(pixel(20, 3) == 0xFF101010u);
+    rect(20, 0, 24, 8, 0xFF0000FFu);             /* and without a flip */
+    nv2a_vk_store();
+    CHECK(pixel(21, 3) == 0xFF0000FFu);
+}
+
+/* The title's CPU draws: some of the picture, then all of it. */
+static void test_late_cpu(void)
+{
+    uint32_t v = 0xFF777777u, x, y;
+
+    clear(0xFF000000u);
+    rect(0, 0, 8, 8, 0xFFFF0000u);
+    flip();
+    memcpy(s_mem + COLOR_AT + 4 * 5, &v, 4);     /* over what was drawn */
+    flip();
+    all_back();
+    CHECK(pixel(5, 0) == v && pixel(4, 0) == 0xFFFF0000u && pixel(20, 0) == 0xFF000000u);
+
+    /* A film's frame, black in places as guest memory already is. */
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            uint32_t c = x < 4 ? 0xFF000000u : 0xFF000000u | x << 8 | y;
+            memcpy(s_mem + COLOR_AT + 4 * (y * W + x), &c, 4);
+        }
+    flip();
+    nv2a_vk_wait();
+    CHECK(pixel(2, 2) == 0xFF000000u && pixel(6, 2) == 0xFF000602u);
+    rect(0, 0, 2, 2, 0xFF00FF00u);               /* and drawn over */
+    flip();
+    all_back();
+    CHECK(pixel(1, 1) == 0xFF00FF00u && pixel(2, 2) == 0xFF000000u
+          && pixel(6, 2) == 0xFF000602u);
+}
+
+/* Drawn in one frame, sampled in the next, with no wait between. */
+static void test_late_feedback(void)
+{
+    unsigned i;
+
+    paint(A_AT, 16, 16, 64, 0x0128, 0xFF000000u);
+    rect(0, 0, 8, 16, 0xFF010203u);
+    main_surface();
+    flip();
+    mark();
+    for (i = 0; i < 6; i++) {                    /* A into B into A ... */
+        uint32_t from = i & 1 ? B_AT : A_AT, to = i & 1 ? A_AT : B_AT;
+
+        surface(to, 16, 16, 64, 0x0128);
+        pass(8);
+        bind_linear(from, 0x12, 16, 16, 64);
+        quad(0, 0, 16, 16, 0, 16, 16);
+        flip();
+    }
+    show();
+    quad(0, 0, 16, 16, 0, 16, 16);               /* from A, the last target */
+    flip();
+    CHECK(waited_for(0));
+    all_back();
+    CHECK(pixel(3, 3) == 0xFF010203u && pixel(12, 3) == 0xFF000000u);
+    method(0x1E70, 0);
+    pass(4);
+}
+
+/* A texture loaded where a picture was: guest memory's bytes, all of them,
+ * although some are what stale memory held already. */
+static void test_late_reuse(void)
+{
+    uint32_t i;
+    uint16_t v = 0x001F;                         /* R6G5B5: blue */
+
+    memset(s_mem + C_AT, 0, 16 * 16 * 2);
+    paint(C_AT, 16, 16, 32, 0x0123, 0xFF000000u);
+    rect(0, 0, 16, 16, 0xFFFFFFFFu);
+    main_surface();
+    flip();
+    for (i = 0; i < 128; i++)                    /* half of it, the rest black */
+        memcpy(s_mem + C_AT + 2 * i, &v, 2);
+    clear(0xFF00FF00u);
+    show();
+    bind_linear(C_AT, 0x37, 16, 16, 32);
+    quad(0, 0, 16, 16, 0, 16, 16);
+    flip();
+    all_back();
+    CHECK(pixel(3, 3) == 0xFF0000FFu && pixel(3, 12) == 0xFF000000u);
+
+    /* Freed, and something else is there: nothing is stored over it. */
+    paint(B_AT, 16, 16, 64, 0x0128, 0xFF000000u);
+    rect(0, 0, 16, 16, 0xFFFFFFFFu);
+    main_surface();
+    flip();
+    nv2a_vk_memory_freed(GUEST(B_AT), 16 * 16 * 4);
+    memset(s_mem + B_AT, 0x3C, 16 * 16 * 4);
+    s_mem[B_AT] = 0;
+    all_back();
+    CHECK(s_mem[B_AT] == 0 && s_mem[B_AT + 1] == 0x3C && s_mem[B_AT + 1023] == 0x3C);
+    method(0x1E70, 0);
+    pass(4);
+}
+
+/* Vertices the GPU drew: the title's CPU never touched them. */
+static void test_late_vertices(void)
+{
+    uint32_t i;
+
+    /* Four positions as the pixels of a surface of floats' bytes. */
+    static const float p[16] = { 4, 4, 0, 1,  12, 4, 0, 1,  12, 12, 0, 1,  4, 12, 0, 1 };
+
+    memset(s_mem + A_AT, 0, 64 * 4);
+    paint(A_AT, 16, 16, 64, 0x0128, 0x00000000u);
+    for (i = 0; i < 16; i++) {
+        uint32_t v;
+        memcpy(&v, &p[i], 4);
+        rect((float)i, 0, (float)i + 1, 1, v);
+    }
+    main_surface();
+    clear(0xFF000000u);
+    flip();
+    CHECK(word(A_AT + 4) == 0);                  /* still on the card */
+    diffuse(0xFFABCDEFu);
+    method(0x1720, A_AT);
+    method(0x17FC, 8);
+    method(0x1810, 3u << 24);
+    method(0x17FC, 0);
+    method(0x1720, POS_AT);
+    flip();
+    all_back();
+    CHECK(pixel(8, 8) == 0xFFABCDEFu && pixel(2, 2) == 0xFF000000u);
+}
+
+/* The random frames again: the same memory in the end, without a wait. */
+static uint64_t random_blocks(Nv2aVkCopyback mode)
+{
+    uint64_t sum = 1469598103934665603ull;
+    unsigned block, op, i;
+
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
+    main_surface();
+    flip();
+    memset(s_mem + A_AT, 0xA5, 0x10000);
+    for (block = 0; block < 12; block++) {
+        nv2a_vk_copyback(mode);
+        for (op = 0; op < 100; op++)
+            random_operation(0);
+        nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
+        main_surface();
+        flip();
+        for (i = 0; i < 0x10000; i++)
+            sum = (sum ^ s_mem[A_AT + i]) * 1099511628211ull;
+    }
+    return sum;
+}
+
+static void test_late(void)
+{
+    unsigned round;
+
+    setup();
+    test_late_picture();
+    test_late_cpu();
+    test_late_feedback();
+    test_late_reuse();
+    test_late_vertices();
+    for (round = 101; round <= 106; round++) {
+        uint64_t always, never;
+
+        s_seed = round;
+        always = random_blocks(NV2A_VK_COPYBACK_ALWAYS);
+        s_seed = round;
+        never = random_blocks(NV2A_VK_COPYBACK_NEVER);
+        CHECK(always == never);
+    }
+    method(0x1D98, (W - 1u) << 16);
+    method(0x1D9C, (H - 1u) << 16);
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
+    main_surface();
+    method(0x1E70, 0);
+    pass(4);
+}
+
 /* Guest memory as the console has it: the window at 0x80000000 and again at
  * 0xF0000000, and some low memory. */
 static int memory_init(void)
@@ -3910,6 +4149,536 @@ static void test_all(void)
     test_many();
 }
 
+/* ---- the window's swap chain (nv2a_vk_present.h): `present` -------------- */
+
+#if defined(_WIN32)
+extern void nv2a_pb_exec_walk_begin(void);
+extern int nv2a_pb_exec_flip_poll(void);
+
+static uint32_t s_seen[1280 * 960], s_seen_w, s_seen_h;
+static volatile LONG s_seen_count;
+
+static void seen(const uint32_t *px, uint32_t w, uint32_t h)
+{
+    if ((size_t)w * h <= sizeof s_seen / 4)
+        memcpy(s_seen, px, (size_t)w * h * 4);
+    s_seen_w = w;
+    s_seen_h = h;
+    InterlockedIncrement(&s_seen_count);
+}
+
+static uint32_t at(uint32_t x, uint32_t y)
+{
+    return x < s_seen_w && y < s_seen_h ? s_seen[y * s_seen_w + x] & 0xFFFFFFu : 0xBAD00000u;
+}
+
+#define AWAY (-20000)                           /* on no screen, and never in front */
+
+static DWORD WINAPI window_thread(LPVOID opened)
+{
+    MSG m;
+
+    s_window = CreateWindowExA(WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, "STATIC", "nv2a_vk_present",
+                               WS_POPUP, AWAY, AWAY, 800, 480, NULL, NULL, NULL, NULL);
+    ShowWindow((HWND)s_window, SW_SHOWNOACTIVATE);
+    SetEvent((HANDLE)opened);
+    while (GetMessageA(&m, NULL, 0, 0) > 0)
+        DispatchMessageA(&m);
+    return 0;
+}
+
+static void fits(uint32_t w, uint32_t h, uint32_t rows_of, uint32_t rows, int x0, int y0, int x1,
+                 int y1, uint32_t want)
+{
+    VkOffset3D to[2];
+    uint32_t from;
+
+    nv2a_vk_present_fit(w, h, NV2A_VK_ASPECT_4_3, rows_of, rows, to, &from);
+    CHECK(to[0].x == x0 && to[0].y == y0 && to[1].x == x1 && to[1].y == y1 && from == want);
+    CHECK(to[0].z == 0 && to[1].z == 1);
+}
+
+static void fits_in(Nv2aVkAspect aspect, uint32_t w, uint32_t h, int x0, int y0, int x1, int y1)
+{
+    VkOffset3D to[2];
+    uint32_t from;
+
+    nv2a_vk_present_fit(w, h, aspect, 480, 480, to, &from);
+    CHECK(to[0].x == x0 && to[0].y == y0 && to[1].x == x1 && to[1].y == y1 && from == 480);
+}
+
+static void test_aspects(void)
+{
+    unsigned i;
+
+    for (i = 1; i < NV2A_VK_ASPECTS; i++)
+        CHECK(nv2a_vk_present_aspect((Nv2aVkAspect)i, 0) == (Nv2aVkAspect)i
+              && nv2a_vk_present_aspect((Nv2aVkAspect)i, 1) == (Nv2aVkAspect)i);
+    CHECK(nv2a_vk_present_aspect(NV2A_VK_ASPECT_AUTO, 0) == NV2A_VK_ASPECT_4_3);
+    CHECK(nv2a_vk_present_aspect(NV2A_VK_ASPECT_AUTO, 1) == NV2A_VK_ASPECT_16_9);
+    fits_in(NV2A_VK_ASPECT_16_9, 1920, 1080, 0, 0, 1920, 1080);
+    fits_in(NV2A_VK_ASPECT_16_9, 800, 480, 0, 15, 800, 465);
+    fits_in(NV2A_VK_ASPECT_16_9, 1000, 450, 100, 0, 900, 450);
+    fits_in(NV2A_VK_ASPECT_16_9, 640, 480, 0, 60, 640, 420);
+    fits_in(NV2A_VK_ASPECT_STRETCH, 1000, 450, 0, 0, 1000, 450);
+    fits_in(NV2A_VK_ASPECT_4_3, 1920, 1080, 240, 0, 1680, 1080);
+    CHECK(nv2a_vk_present_fill(0, 0) == 1 && nv2a_vk_present_fill(640, 480) == 1);
+    CHECK(nv2a_vk_present_fill(641, 480) == 2 && nv2a_vk_present_fill(640, 481) == 2);
+    CHECK(nv2a_vk_present_fill(1920, 1080) == 3 && nv2a_vk_present_fill(1440, 1080) == 3);
+    CHECK(nv2a_vk_present_fill(1280, 960) == 2 && nv2a_vk_present_fill(3840, 2160) == 4);
+}
+
+static void test_modes(void)
+{
+    static const VkPresentModeKHR all[] = {
+        VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR,
+        VK_PRESENT_MODE_FIFO_RELAXED_KHR };
+    static const struct { const char *asked; VkPresentModeKHR all, two; } m[] = {
+        { NULL, VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_KHR },
+        { "1", VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_KHR },
+        { "mailbox", VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_MAILBOX_KHR },
+        { "0", VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR },
+        { "immediate", VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR },
+        { "fifo", VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_FIFO_KHR },
+        { "adaptive", VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_FIFO_KHR } };
+    unsigned i;
+
+    for (i = 0; i < sizeof m / sizeof m[0]; i++) {
+        CHECK(nv2a_vk_present_mode(m[i].asked, all, 4) == m[i].all);
+        CHECK(nv2a_vk_present_mode(m[i].asked, all + 1, 2) == m[i].two);
+        CHECK(nv2a_vk_present_mode(m[i].asked, all + 2, 1) == VK_PRESENT_MODE_FIFO_KHR);
+        CHECK(nv2a_vk_present_mode(m[i].asked, all, 0) == VK_PRESENT_MODE_FIFO_KHR);
+    }
+}
+
+static Nv2aVkPresentStats shown_stats(void)
+{
+    Nv2aVkPresentStats st;
+
+    nv2a_vk_present_stats(&st);
+    return st;
+}
+
+/* Waits up to a second for `n` pictures since the start. */
+static int shown_by(unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < 200 && shown_stats().shown < n; i++)
+        Sleep(5);
+    return shown_stats().shown == n;
+}
+
+/* Waits up to a second for another picture drawn again. The thread counts it
+ * after it was seen. */
+static int redrawn_since(unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < 200 && shown_stats().redrawn == n; i++)
+        Sleep(5);
+    return shown_stats().redrawn != n;
+}
+
+static int overlaid_after(unsigned n)
+{
+    unsigned i;
+
+    for (i = 0; i < 100 && s_overlaid == n; i++)
+        Sleep(5);
+    Sleep(30);                                  /* and in the window */
+    return s_overlaid != n;
+}
+
+/* The picture's edges in the window of 800x480, the whole of it one colour:
+ * 4:3 has bars at its sides, 16:9 above and below. */
+static int seen_as(uint32_t color)
+{
+    int side, top;
+
+    nv2a_vk_wait();
+    side = at(40, 240) == color;
+    top = at(400, 5) == color;
+    CHECK(at(400, 240) == color && at(90, 20) == color && (side || top));
+    return side && top ? NV2A_VK_ASPECT_STRETCH : side ? NV2A_VK_ASPECT_16_9 : NV2A_VK_ASPECT_4_3;
+}
+
+static void test_aspect(void)
+{
+    uint32_t i;
+
+    s_wide = 0;
+    surface(BIG_AT, 640, 480, 2560, 0x0128);
+    clear(0xFF102030u);
+    flip();
+    CHECK(nv2a_vk_aspect_is() == NV2A_VK_ASPECT_AUTO && seen_as(0x102030) == NV2A_VK_ASPECT_4_3);
+    s_wide = 1;
+    clear(0xFF102030u);
+    rect(0, 0, 640, 480, 0xFF203040u);
+    flip();
+    CHECK(seen_as(0x203040) == NV2A_VK_ASPECT_16_9);
+    /* Asked for at any time, the same picture again. */
+    for (i = 1; i < NV2A_VK_ASPECTS; i++) {
+        unsigned n = s_seen_count, t;
+
+        nv2a_vk_aspect((Nv2aVkAspect)i);
+        for (t = 0; t < 400 && s_seen_count == n; t++)
+            Sleep(5);
+        CHECK(s_seen_count > n && seen_as(0x203040) == (int)i);
+    }
+    nv2a_vk_aspect(NV2A_VK_ASPECTS);
+    CHECK(nv2a_vk_aspect_is() == NV2A_VK_ASPECT_STRETCH);
+    /* And another vsync and filter. */
+    for (i = 1; i < 8; i++) {
+        unsigned n = s_seen_count, t;
+        unsigned chains = shown_stats().chains;
+
+        if (i & 1)
+            nv2a_vk_present_filter(i >> 1 & 1);
+        else
+            nv2a_vk_present_vsync((int)(i / 2 + 1) & 3);
+        for (t = 0; t < 400 && s_seen_count == n; t++)
+            Sleep(5);
+        CHECK(i == 1 || (s_seen_count > n && seen_as(0x203040) == NV2A_VK_ASPECT_STRETCH));
+        CHECK(shown_stats().chains == chains + !(i & 1));
+    }
+    nv2a_vk_present_vsync(1);
+    nv2a_vk_present_filter(0);
+    nv2a_vk_aspect(NV2A_VK_ASPECT_AUTO);
+
+    s_wide = 0;
+}
+
+/* The video overlay, over the picture, or over nothing. 640x480, so pixels are
+ * the picture's. */
+static void test_overlay_first(void)
+{
+    s_over_color = 0xFF00C040u;
+    s_overlay = 2;
+    CHECK(overlaid_after(0));                   /* no picture yet */
+    CHECK(s_under[0] == 0xFF000000u && s_under[100 * 640 + 100] == 0xFF000000u);
+    CHECK(s_seen_w == 800 && at(80 + 100, 100) == 0x00C040 && at(80 + 400, 100) == 0);
+    CHECK(at(80 + 100, 310) == 0);
+    s_overlay = 3;
+    CHECK(overlaid_after(1));
+    CHECK(at(80 + 100, 100) == 0 && s_overlay == 0);
+}
+
+static void test_overlay(void)
+{
+    unsigned n, i;
+    Nv2aVkPresentStats was;
+
+    surface(BIG_AT, 640, 480, 2560, 0x0128);
+    clear(0xFF806040u);
+    rect(0, 0, 40, 480, 0xFF102030u);           /* not the key */
+    flip();
+    nv2a_vk_wait();
+    n = s_overlaid;
+    Sleep(100);
+    CHECK(s_overlaid == n && at(80 + 100, 100) == 0x806040);
+    was = shown_stats();
+    s_over_color = 0xFFC04000u;
+    s_overlay = 2;
+    CHECK(overlaid_after(n));                   /* with no new picture */
+    CHECK(redrawn_since(was.redrawn));
+    CHECK(s_under[100 * 640 + 100] == 0xFF806040u && s_under[100 * 640 + 39] == 0xFF102030u);
+    CHECK(s_under[100 * 640 + 40] == 0xFF806040u && s_under[479 * 640 + 639] == 0xFF806040u);
+    CHECK(at(80 + 100, 100) == 0xC04000 && at(80 + 20, 100) == 0x102030);
+    CHECK(at(80 + 400, 100) == 0x806040 && at(80 + 100, 310) == 0x806040 && at(40, 100) == 0);
+    for (i = 1; i <= 8; i++) {                  /* frames of both */
+        s_over_color = 0xFFC04000u + i * 8;
+        rect(320, 0, 640, 480, 0xFF000000u + i);
+        flip();
+        nv2a_vk_wait();
+        CHECK(at(80 + 100, 100) == 0xC04000 + i * 8 && at(80 + 400, 100) == i);
+    }
+    n = s_overlaid;
+    for (i = 0; i < 8; i++) {                   /* only the overlay's */
+        s_over_color = 0xFF000040u + i;
+        s_overlay = 2;
+        CHECK(overlaid_after(n + i) && at(80 + 100, 100) == 0x40 + i && at(80 + 400, 100) == 8);
+    }
+    s_overlay = 3;                              /* stopped */
+    n = s_overlaid;
+    CHECK(overlaid_after(n) && s_overlay == 0 && at(80 + 100, 100) == 0x806040);
+    rect(0, 0, 640, 480, 0xFF334455u);
+    flip();
+    nv2a_vk_wait();
+    CHECK(s_overlaid == n + 1 && at(80 + 100, 100) == 0x334455);
+
+    /* Of another format, and fewer rows than the window's. */
+    s_overlay = 1;
+    surface(SMALL_AT, 16, 16, 32, 0x0123);
+    clear(0xFFFF0000u);
+    flip();
+    nv2a_vk_wait();
+    CHECK((s_under[8 * 640 + 8] & 0xFFFFFFu) == 0xFF0000 && s_under[16 * 640 + 8] == 0xFF000000u);
+    s_overlay = 0;
+}
+
+
+static void test_present(void)
+{
+    Nv2aVkPresentStats was;
+    Nv2aPerfStats perf;
+    Nv2aVkStats st;
+    unsigned i, readbacks;
+    LONG count;
+    HWND window;
+
+    fits(640, 480, 480, 480, 0, 0, 640, 480, 480);
+    fits(1920, 1080, 480, 480, 240, 0, 1680, 1080, 480);
+    fits(600, 800, 480, 480, 0, 175, 600, 625, 480);
+    fits(640, 480, 448, 480, 0, 0, 640, 448, 448);      /* ends early */
+    fits(640, 480, 512, 480, 0, 0, 640, 480, 480);      /* cut */
+    fits(640, 480, 960, 960, 0, 0, 640, 480, 960);
+    fits(1, 1, 480, 480, 0, 0, 1, 1, 480);
+    test_aspects();
+    test_modes();
+
+    /* Four thirds of the window's height, centred; the surface's 32 rows are
+     * the first 32 of 480, its 64 columns all 640. */
+    CHECK(s_external == 3);
+    nv2a_vk_present_watch(seen, 1);
+    test_overlay_first();
+    s_seen_count = 0;
+    setup();
+    main_surface();
+    clear(0xFF102030u);
+    rect(8, 8, 16, 16, 0xFFFF8000u);
+    flip();
+    nv2a_vk_wait();
+    CHECK(s_seen_count == 1 && s_seen_w == 800 && s_seen_h == 480);
+    CHECK(at(82, 2) == 0x102030 && at(718, 29) == 0x102030);
+    CHECK(at(170, 12) == 0xFF8000 && at(230, 12) == 0xFF8000 && at(255, 12) == 0x102030);
+    CHECK(at(77, 2) == 0 && at(722, 2) == 0);           /* the bars, and below */
+    CHECK(at(400, 34) == 0 && at(400, 470) == 0);
+    CHECK(s_windowed == 0);
+
+    /* What is shown is what the surface was then; nothing comes back. */
+    nv2a_vk_stats(&st);
+    readbacks = st.readbacks;
+    for (i = 1; i <= 10; i++) {
+        rect(0, 0, 64, 32, 0xFF000000u | i * 16);
+        flip();
+        rect(0, 0, 64, 32, 0xFFFFFFFFu);        /* the next frame's */
+        nv2a_vk_wait();
+        CHECK(at(400, 16) == i * 16);
+    }
+    nv2a_vk_stats(&st);
+    CHECK(st.readbacks == readbacks && s_windowed == 0);
+
+    /* All at once: the last stays, each was shown or passed over. */
+    was = shown_stats();
+    for (i = 1; i <= 100; i++) {
+        rect(0, 0, 64, 32, 0xFF000000u | i);
+        flip();
+    }
+    nv2a_vk_wait();
+    CHECK(at(400, 16) == 100);
+    CHECK(shown_stats().shown + shown_stats().passed_over
+          == was.shown + was.passed_over + 100);
+
+    /* R5G6B5, and a copy back at each flip. */
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
+    surface(SMALL_AT, 16, 16, 32, 0x0123);
+    clear(0xFF000000u);
+    rect(0, 0, 8, 16, 0xFFFF0000u);
+    flip();
+    nv2a_vk_wait();
+    CHECK(at(200, 8) == 0xFF0000 && at(600, 8) == 0);
+    main_surface();
+    clear(0xFF00FF00u);
+    flip();
+    nv2a_vk_wait();
+    CHECK(at(400, 16) == 0x00FF00 && pixel(5, 5) == 0xFF00FF00u);
+    rect(0, 0, 64, 32, 0xFF00FFFFu);
+    flip();
+    memcpy(&i, s_mem + COLOR_AT, 4);            /* by the flip, not the wait */
+    CHECK(i == 0xFF00FFFFu);
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+
+    /* Each scale from one flip to the next. */
+    CHECK(nv2a_vk_anisotropy_is() == 1 && nv2a_vk_scale_is() == 1);
+    for (i = 0; i <= NV2A_VK_SCALES; i++) {
+        nv2a_vk_scale(((int)i + 2) % (NV2A_VK_SCALES + 1));
+        rect(0, 0, 64, 32, 0xFF000000u | i);
+        flip();
+        nv2a_vk_wait();
+    }
+    CHECK(nv2a_vk_scale_is() == 1);
+    CHECK(at(400, 16) == NV2A_VK_SCALES);
+
+    /* Larger than the title's: what it draws is in the window so. */
+    for (i = 4; i; i -= 3) {
+        nv2a_vk_scale((int)i);
+        flip();
+        clear(0xFF000000u);
+        rect(8, 8, 8.25f, 16, 0xFFFFFFFFu);
+        flip();
+        nv2a_vk_wait();
+        CHECK((at(161, 12) > 0x800000) == (i == 4) && at(168, 12) == 0);
+    }
+    nv2a_vk_scale(1);
+    flip();
+    /* As large as the window: 800x480 and 4:3, so 1; 16:9, so 2. */
+    CHECK(nv2a_vk_present_scale() == 1);
+    s_wide = 1;
+    nv2a_vk_scale(NV2A_VK_SCALE_FIT);
+    for (i = 0; i < 40; i++) {
+        clear(0xFF000000u);
+        rect(8, 8, 8.4375f, 16, 0xFFFFFFFFu);
+        flip();
+        nv2a_vk_wait();
+        if (i == 4)                             /* not at once */
+            CHECK(nv2a_vk_present_scale() == 2 && at(103, 26) == 0);
+    }
+    CHECK(at(103, 26) > 0x800000 && at(112, 26) == 0);
+    s_wide = 0;
+    nv2a_vk_scale(1);
+    flip();
+
+    /* Twice as wide and high (AA): all of it. */
+    surface(BIG_AT, 640, 480, 5120, 0x2128);
+    clear(0xFF202020u);
+    rect(320.5f, 240.5f, 640, 480, 0xFF0000FFu);
+    flip();
+    nv2a_vk_wait();
+    CHECK(at(300, 200) == 0x202020 && at(500, 300) == 0x0000FF && at(715, 475) == 0x0000FF);
+    s_overlay = 1;
+    flip();
+    nv2a_vk_wait();
+    s_overlay = 0;
+    CHECK(s_under[200 * 640 + 300] == 0xFF202020u && s_under[300 * 640 + 400] == 0xFF0000FFu);
+    CHECK(s_under[300 * 640 + 319] == 0xFF202020u);     /* one of the colours, whole */
+    CHECK(s_under[300 * 640 + 320] == 0xFF0000FFu || s_under[300 * 640 + 320] == 0xFF202020u);
+    CHECK(at(80 + 100, 100) == (s_over_color & 0xFFFFFFu) && at(80 + 400, 300) == 0x0000FF);
+
+    /* Its memory is the title's again: shown from there. */
+    surface(BIG_AT, 640, 480, 2560, 0x0128);
+    clear(0xFF202020u);
+    rect(0, 0, 8, 8, 0xFFFFFFFFu);
+    flip();
+    nv2a_vk_wait();
+    nv2a_vk_memory_freed(GUEST(BIG_AT), 640 * 480 * 4);
+    for (i = 0; i < 640 * 480; i++)
+        ((uint32_t *)(void *)(s_mem + BIG_AT))[i] = i < 640 * 240 ? 0xFF112233u : 0xFF445566u;
+    flip();
+    nv2a_vk_wait();
+    CHECK(at(400, 100) == 0x112233 && at(400, 400) == 0x445566);
+
+    test_overlay();
+    test_aspect();
+
+    /* The same picture again when the window's size changes. */
+    main_surface();
+    for (i = 0; i < 6; i++) {                   /* over all of the chain's images */
+        clear(0xFF665544u);
+        flip();
+        nv2a_vk_wait();
+        CHECK(at(400, 16) == 0x665544 && at(400, 400) == 0);
+    }
+    was = shown_stats();
+    count = s_seen_count;
+    SetWindowPos((HWND)s_window, NULL, AWAY, AWAY, 400, 600, SWP_NOACTIVATE | SWP_NOZORDER);
+    for (i = 0; i < 200 && s_seen_count == count; i++)
+        Sleep(5);
+    CHECK(redrawn_since(was.redrawn) && shown_stats().chains > was.chains);
+    CHECK(s_seen_w == 400 && s_seen_h == 600);
+    CHECK(at(200, 160) == 0x665544 && at(200, 140) == 0 && at(200, 175) == 0);
+
+    /* Minimised, flips go on; afterwards they show again. */
+    was = shown_stats();
+    ShowWindow((HWND)s_window, SW_SHOWMINNOACTIVE);
+    for (i = 0; i < 20; i++) {
+        rect(0, 0, 64, 32, 0xFF000000u | i);
+        flip();
+    }
+    nv2a_vk_wait();
+    ShowWindow((HWND)s_window, SW_SHOWNOACTIVATE);
+    Sleep(50);
+    rect(0, 0, 64, 32, 0xFF0000AAu);
+    flip();
+    nv2a_vk_wait();
+    CHECK(at(200, 160) == 0xAA);
+
+    /* When each is shown is told. */
+    nv2a_perf_set(0);
+    flip();
+    nv2a_vk_wait();
+    nv2a_perf_set(1);
+    for (i = 0; i < 12; i++) {
+        flip();
+        nv2a_vk_wait();
+    }
+    nv2a_perf_stats(1e9, &perf);
+    CHECK(perf.frames == 11 && perf.shown.n == 10 && perf.skipped == 0);
+    nv2a_perf_set(0);
+
+    /* Held for its vblank (RECOMP_FLIP_PACING), as the executor holds flips. */
+    s_vblanks = 100;
+    nv2a_pb_exec_walk_begin();
+    flip();                                     /* where it counts from */
+    nv2a_vk_wait();
+    was = shown_stats();
+    nv2a_pb_exec_walk_begin();
+    flip();                                     /* for 101 */
+    Sleep(50);
+    CHECK(shown_stats().shown == was.shown);
+    s_vblanks = 101;
+    CHECK(!nv2a_pb_exec_flip_poll());
+    CHECK(shown_by(was.shown + 1));
+    nv2a_pb_exec_walk_begin();
+    s_vblanks = 103;                            /* the next is late: at once */
+    flip();
+    CHECK(shown_by(was.shown + 2));
+    nv2a_pb_exec_flip_poll();
+    nv2a_pb_exec_walk_begin();
+    flip();                                     /* no vblank comes: not for ever */
+    CHECK(shown_by(was.shown + 3));
+    nv2a_vk_wait();
+
+    /* Its window closed, the title goes on. */
+    CHECK(nv2a_vk_present_on() && s_external == 3);
+    window = (HWND)s_window;
+    s_window = NULL;
+    PostMessageA(window, WM_CLOSE, 0, 0);
+    for (i = 0; i < 400 && nv2a_vk_present_on(); i++)
+        Sleep(5);
+    CHECK(!nv2a_vk_present_on());
+    count = s_seen_count;
+    for (i = 0; i < 10; i++)
+        flip();
+    nv2a_vk_wait();
+    Sleep(700);
+    CHECK(s_seen_count == count && s_windowed == 0);
+}
+
+static int present_main(void)
+{
+    HANDLE opened = CreateEventA(NULL, TRUE, FALSE, NULL);
+
+    _putenv_s("RECOMP_NV2A_VK_PIPELINE_CACHE", "0");
+    _putenv_s("RECOMP_FLIP_PACING", "1");
+    nv2a_pb_exec_set_resolver(offset_va);
+    if (!memory_init() || !nv2a_vk_init() || s_external != 2) {
+        puts("no Vulkan window output here: skipped");
+        return 77;
+    }
+    CHECK(!nv2a_vk_present_on() && s_external == 2);    /* no window yet */
+    CloseHandle(CreateThread(NULL, 0, window_thread, opened, 0, NULL));
+    WaitForSingleObject(opened, 5000);
+    CHECK(GetForegroundWindow() != (HWND)s_window);
+    CHECK(nv2a_vk_present_on());
+    test_present();
+    if (!s_fail)
+        puts("NV2A Vulkan window output: ok");
+    return s_fail;
+}
+#endif
+
+/* The pipelines' file: whole and this card's, or nothing. */
 /* The pipelines' file: whole and this card's, or nothing. */
 static void test_cache_file(void)
 {
@@ -4016,10 +4785,45 @@ static void test_shader_compile(void)
     method(0x033C, 0x207);
 }
 
+/* RECOMP_NV2A_VK_PRESENT=0, set by the test's entry: the toolkit's window is
+ * left alone and takes each picture from guest memory, even with no copy-back. */
+static int shows_main(void)
+{
+    unsigned i;
+
+    nv2a_pb_exec_set_resolver(offset_va);
+    if (!memory_init() || !nv2a_vk_init()) {
+        puts("no Vulkan here: skipped");
+        return 77;
+    }
+    CHECK(s_external == -1);
+    setup();
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+    main_surface();
+    clear(0xFF101010u);
+    flip();
+    CHECK(s_windowed == 1 && pixel(3, 3) == 0xFF101010u);
+    for (i = 1; i <= 5; i++) {
+        rect(0, 0, 8, 8, 0xFF000000u | i);
+        flip();
+        CHECK(s_windowed == 1 + i && pixel(3, 3) == (0xFF000000u | i));
+    }
+    CHECK(s_external == -1 && !nv2a_vk_present_on());
+    if (!s_fail)
+        puts("NV2A Vulkan, the window shows guest memory: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     Nv2aVkStats st;
 
+    if (argc > 1 && strcmp(argv[1], "shows") == 0)
+        return shows_main();
+#if defined(_WIN32)
+    if (argc > 1 && strcmp(argv[1], "present") == 0)
+        return present_main();
+#endif
     (void)argc; (void)argv;
     nv2a_pb_exec_set_resolver(offset_va);
     test_cache_file();
@@ -4036,6 +4840,12 @@ int main(int argc, char **argv)
     }
     nv2a_vk_copyback(NV2A_VK_COPYBACK_ALWAYS);
     test_all();
+    test_late();
+    nv2a_vk_scale(2);
+    flip();
+    test_late();
+    nv2a_vk_scale(1);
+    flip();
     test_shader_compile();
     nv2a_vk_stats(&st);
     CHECK(st.refused == 0 && st.draws > 400);    /* all of it drawn here */

@@ -5006,10 +5006,10 @@ static int picture_copy(uint32_t va, uint32_t pitch, uint32_t aa_sy, uint32_t *s
 }
 
 /* A flip to the window: for the vblank it will be held until. */
-static void present_picture(uint32_t va, uint32_t pitch, uint32_t aa_sy)
+static void present_picture(const Nv2aPresent *p)
 {
-    uint32_t due = 0, scale = 1;
-    int picture = picture_copy(va, pitch, aa_sy, &scale);
+    uint32_t scale = 1;
+    int picture = picture_copy(p->va, p->pitch, p->aa_sy, &scale);
 
     if (g.mode == NV2A_VK_COPYBACK_ALWAYS) {
         store_range(0, 0x100000000ull, NULL);
@@ -5022,9 +5022,7 @@ static void present_picture(uint32_t va, uint32_t pitch, uint32_t aa_sy)
     if (picture >= 0 && g.lost) {
         nv2a_vk_present_drop(picture);
     } else if (picture >= 0) {
-        int has_due = 0;                /* no vblank to aim for yet */
-
-        nv2a_vk_present_show(picture, g.submits, 480 * aa_sy * scale, has_due, due,
+        nv2a_vk_present_show(picture, g.submits, 480 * p->aa_sy * scale, p->has_due, p->due,
                              nv2a_perf_frame_open());
     }
 }
@@ -5202,14 +5200,14 @@ static void aspect_named(const char *name)
     fprintf(stderr, "[NV2A-VK] no aspect ratio %s: auto, 4:3, 16:9 or stretch\n", name);
 }
 
-static void present(uint32_t va, uint32_t pitch, uint32_t aa_sy)
+static void present(const Nv2aPresent *p)
 {
     uint32_t scale, samples;
 
     freed_surfaces();
     if (g.mode == NV2A_VK_COPYBACK_TOUCH)
         store_untracked();
-    present_picture(va, pitch, aa_sy);
+    present_picture(p);
     g.surf = NULL;                      /* look at guest memory again */
     g.frame++;
     textures_trim();
@@ -5381,18 +5379,28 @@ static void vk_idle(void)
     leave();
 }
 
-/* At a flip, before the toolkit's window takes its picture from guest memory:
- * everything drawn is put there, whatever the copy-back mode, and the frame
- * ends. */
-static void vk_flip(void)
+/* RECOMP_NV2A_VK_PRESENT=0: the toolkit's window shows the picture from guest
+ * memory, where everything drawn is put at each flip whatever the copy-back
+ * mode. For timing Vulkan's present against it. */
+static int s_window_shows;
+
+static int vk_present(const Nv2aPresent *p)
 {
     enter();
-    if (g.mode != NV2A_VK_COPYBACK_ALWAYS) {
-        store_range(0, 0x100000000ull, NULL);
-        flush();
+    if (s_window_shows) {
+        Nv2aPresent none = { 0, 0, 1, 0, 0 };
+
+        if (g.mode != NV2A_VK_COPYBACK_ALWAYS) {
+            store_range(0, 0x100000000ull, NULL);
+            flush();
+        }
+        present(&none);
+        leave();
+        return 0;
     }
-    present(0, 0, 1);
+    present(p);
     leave();
+    return 1;                           /* the window has it, or there is none */
 }
 
 void nv2a_vk_store(void)
@@ -5882,8 +5890,13 @@ int nv2a_vk_init(void)
     }
     g.frame = 1;
     cache_open();
-    nv2a_vk_present_start(g.instance, g.phys, g.dev, g.family, g.show_queue,
-                          g.show_queue == g.queue, g.timeline);
+    e = getenv("RECOMP_NV2A_VK_PRESENT");
+    s_window_shows = e && strcmp(e, "0") == 0;
+    if (s_window_shows)
+        fprintf(stderr, "[NV2A-VK] RECOMP_NV2A_VK_PRESENT=0: the window shows guest memory\n");
+    else
+        nv2a_vk_present_start(g.instance, g.phys, g.dev, g.family, g.show_queue,
+                              g.show_queue == g.queue, g.timeline);
     e = getenv("RECOMP_NV2A_VK_STATS");
     s_draw_clock = e && strcmp(e, "0") != 0;
     e = getenv("RECOMP_NV2A_VK_SCALE");
@@ -5918,7 +5931,8 @@ int nv2a_vk_init(void)
         fprintf(stderr, "[NV2A-VK] no copy-back mode %s: always, touch or never\n", e);
     else if (getenv("RECOMP_FRAME_CAPTURE"))    /* it saves guest memory as it is */
         g.copyback = NV2A_VK_COPYBACK_ALWAYS;
-    nv2a_backend_register_with_present_sync(&s_rest, vk_flip);
+    nv2a_backend_register_with_present_sync(&s_rest, nv2a_vk_store);
+    nv2a_backend_set_present(vk_present);
     fprintf(stderr, "[NV2A-VK] drawing on %s\n", g.props.deviceName);
     return 1;
 }
@@ -5929,7 +5943,10 @@ void nv2a_vk_init_from_env(void)
 
     if (!e || strcmp(e, "0") == 0)
         return;
-    nv2a_vk_init();
+    if (!nv2a_vk_present_possible())
+        fprintf(stderr, "[NV2A-VK] not used: no window output on this host\n");
+    else
+        nv2a_vk_init();
 }
 
 void nv2a_vk_cpu_vertices(int on) { g.cpu_vertices = on; }

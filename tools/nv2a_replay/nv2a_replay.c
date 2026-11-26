@@ -102,21 +102,27 @@ static int captured_va(uint32_t pa, uint32_t *va)
     }
     return 0;
 }
-void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
-void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
-void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch)
+void xbox_FramebufferWindowSet(uint32_t va, uint32_t pitch)
 {
     s_shown_va = va;
     s_shown_pitch = pitch;
-    s_flips++;
 }
+void xbox_FramebufferWindowSetAA(uint32_t sy) { (void)sy; }
+void xbox_FramebufferWindowPresent(uint32_t va, uint32_t pitch) { (void)va; (void)pitch; }
 uint32_t xbox_Nv2aFenceWordVa(void) { return 0; }
 int nv2a_pb_dma_walk(void) { return 1; }
 void xbox_FramebufferWindowStart(void) {}
 void xbox_FramebufferWindowFrameStats(uint32_t draws) { (void)draws; }
-void xbox_Nv2aFrameCounterFlip(void) {}
+void xbox_Nv2aFrameCounterFlip(void) { s_flips++; }
 int nv2a_pb_scan_in_call(void) { return 0; }
 uint32_t xbox_VblankCount(void) { return 0; }
+/* No window: the Vulkan rasteriser puts each picture in the replay's memory. */
+int xbox_DisplayIsWide(void) { return 0; }
+void *xbox_FramebufferWindowHandle(void) { return NULL; }
+void xbox_FramebufferWindowSetExternal(int on) { (void)on; }
+void recomp_exit_hook_run(const char *why) { (void)why; }
+int xbox_FramebufferOverlayState(void) { return 0; }
+void xbox_FramebufferOverlay(uint32_t *rgb) { (void)rgb; }
 uint32_t xbox_Nv2aFrameCountersOwned(void) { return 0; }
 void xbox_RegisterTitleEvent(uint32_t guest_va) { (void)guest_va; }
 void xbox_SetTitleEvent(uint32_t guest_va) { (void)guest_va; }

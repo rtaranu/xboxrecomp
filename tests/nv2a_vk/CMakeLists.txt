@@ -27,6 +27,13 @@ if(XBOXRECOMP_NV2A_VK)
     add_test(NAME nv2a-vk-shader-compile COMMAND nv2a-vk-draw-test)
     set_tests_properties(nv2a-vk-shader-compile PROPERTIES SKIP_RETURN_CODE 77
         ENVIRONMENT RECOMP_NV2A_VK_SHADER_COMPILE=sync)
+    add_test(NAME nv2a-vk-window-shows COMMAND nv2a-vk-draw-test shows)
+    set_tests_properties(nv2a-vk-window-shows PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "RECOMP_NV2A_VK_PRESENT=0;RECOMP_NV2A_VK_PIPELINE_CACHE=0")
+    if(WIN32)                           # opens a window, off the screen
+        add_test(NAME nv2a-vk-present COMMAND nv2a-vk-draw-test present)
+        set_tests_properties(nv2a-vk-present PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 endif()
 if(MSVC)
     target_compile_definitions(nv2a-vk-tex-test PRIVATE _CRT_SECURE_NO_WARNINGS)
