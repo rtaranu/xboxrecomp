@@ -56,6 +56,7 @@ int xbox_FlipHoldStall(XboxFlipHold *h, uint32_t count, uint64_t now_ns,
     h->have_swap = 0;
     h->swap_immediate = 0;
     h->iv[interval < 3 ? interval : 3]++;
+    h->last_interval = interval;
 
     if (!interval || !h->have_last || !clock_ok) {
         h->have_last = 1;
@@ -103,6 +104,16 @@ int xbox_FlipHoldPoll(XboxFlipHold *h, uint32_t count, uint64_t now_ns,
         release(h, now_ns, 1);
         return 0;
     }
+    return 1;
+}
+
+int xbox_FlipHoldDue(const XboxFlipHold *h, uint32_t *due)
+{
+    if (!h->have_last || !h->last_interval || h->edge)
+        return 0;
+    /* A release sets last_flip to the target, so a hold released while
+     * this reads it gives the same answer. */
+    *due = (h->held ? h->target : h->last_flip) + h->last_interval;
     return 1;
 }
 

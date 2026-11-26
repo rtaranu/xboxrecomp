@@ -49,9 +49,11 @@ typedef struct {
     int      have_swap;
     unsigned swap_interval;
     int      swap_immediate;
-    /* The vblank the previous flip was released on. */
+    /* The vblank the previous flip was released on, and the interval it
+     * asked for (0: IMMEDIATE). */
     int      have_last;
     uint32_t last_flip;
+    unsigned last_interval;
     /* A pending hold. */
     int      held;
     uint32_t target;
@@ -80,6 +82,16 @@ int xbox_FlipHoldPoll(XboxFlipHold *h, uint32_t count, uint64_t now_ns,
 
 /* Drop a pending hold without waiting (a walk that lost its place). */
 void xbox_FlipHoldCancel(XboxFlipHold *h, uint64_t now_ns);
+
+/* The vblank the title's next flip is due on, for a backend that presents
+ * on the title's thread and would otherwise show each frame whenever the
+ * title gets to its Swap: the pending hold's target, or the last flip, plus
+ * the interval the latest swap asked for. A present that waits for it lands
+ * on the vblank, and the stall that follows finds its target reached, so
+ * the two never hold the same frame twice. Returns 0 when there is nothing
+ * to wait for: no flip yet, IMMEDIATE, or the edge rule (which holds a
+ * frame stalled on its target one more vblank). */
+int xbox_FlipHoldDue(const XboxFlipHold *h, uint32_t *due);
 
 /* A frame counter the toolkit bumps: does something else (the title's own
  * vblank DPC) keep moving it? Called once per bump with the value the bump
