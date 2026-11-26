@@ -5383,9 +5383,11 @@ static void vk_idle(void)
     leave();
 }
 
-/* RECOMP_NV2A_VK_PRESENT=0: the toolkit's window shows the picture from guest
- * memory, where everything drawn is put at each flip whatever the copy-back
- * mode. For timing Vulkan's present against it. */
+/* RECOMP_NV2A_VK_PRESENT set: the toolkit's window shows the picture from guest
+ * memory, whatever the copy-back mode. For timing Vulkan's present against a
+ * back end without one. At each flip, 0: everything drawn goes there, waiting
+ * for the GPU. shown: the shown surface only, waiting. */
+enum { WINDOW_OFF, WINDOW_ALL, WINDOW_SHOWN };
 static int s_window_shows;
 
 static int vk_present(const Nv2aPresent *p)
@@ -5393,10 +5395,15 @@ static int vk_present(const Nv2aPresent *p)
     enter();
     if (s_window_shows) {
         Nv2aPresent none = { 0, 0, 1, 0, 0 };
+        uint64_t bytes = (uint64_t)p->pitch * 480 * p->aa_sy;
 
-        if (g.mode != NV2A_VK_COPYBACK_ALWAYS) {
+        if (g.mode == NV2A_VK_COPYBACK_ALWAYS) {
+            /* present() puts everything there */
+        } else if (s_window_shows == WINDOW_ALL) {
             store_range(0, 0x100000000ull, NULL);
             flush();
+        } else if (p->va) {
+            store_range(p->va, bytes, NULL);
         }
         present(&none);
         leave();
@@ -5895,9 +5902,13 @@ int nv2a_vk_init(void)
     g.frame = 1;
     cache_open();
     e = getenv("RECOMP_NV2A_VK_PRESENT");
-    s_window_shows = e && strcmp(e, "0") == 0;
+    s_window_shows = !e ? WINDOW_OFF : strcmp(e, "0") == 0 ? WINDOW_ALL
+                   : strcmp(e, "shown") == 0 ? WINDOW_SHOWN : WINDOW_OFF;
+    if (e && !s_window_shows)
+        fprintf(stderr, "[NV2A-VK] no RECOMP_NV2A_VK_PRESENT=%s: 0 or shown\n", e);
     if (s_window_shows)
-        fprintf(stderr, "[NV2A-VK] RECOMP_NV2A_VK_PRESENT=0: the window shows guest memory\n");
+        fprintf(stderr, "[NV2A-VK] RECOMP_NV2A_VK_PRESENT=%s: the window shows guest memory\n",
+                e);
     else
         nv2a_vk_present_start(g.instance, g.phys, g.dev, g.family, g.show_queue,
                               g.show_queue == g.queue, g.timeline);

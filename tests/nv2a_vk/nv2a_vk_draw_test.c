@@ -4816,12 +4816,45 @@ static int shows_main(void)
     return s_fail;
 }
 
+/* RECOMP_NV2A_VK_PRESENT=shown: the shown surface goes to guest memory at each
+ * flip; one drawn off the screen stays on the card. */
+static int shown_main(void)
+{
+    unsigned i;
+
+    nv2a_pb_exec_set_resolver(offset_va);
+    if (!memory_init() || !nv2a_vk_init()) {
+        puts("no Vulkan here: skipped");
+        return 77;
+    }
+    setup();
+    nv2a_vk_copyback(NV2A_VK_COPYBACK_NEVER);
+    memset(s_mem + SMALL_AT, 0xAB, 16 * 64);
+    for (i = 1; i <= 3; i++) {
+        surface(SMALL_AT, 16, 16, 64, 0x0128);
+        rect(0, 0, 16, 16, 0xFF00FF00u);
+        main_surface();
+        clear(0xFF101010u);
+        rect(0, 0, 2, 2, 0xFF000000u | i);
+        flip();
+        CHECK(s_windowed == i && pixel(1, 1) == (0xFF000000u | i)
+              && pixel(3, 3) == 0xFF101010u);
+        CHECK(word(SMALL_AT) == 0xABABABABu && word(SMALL_AT + 15 * 64 + 60) == 0xABABABABu);
+    }
+    CHECK(s_external == -1 && !nv2a_vk_present_on());
+    if (!s_fail)
+        puts("NV2A Vulkan, the window shows the shown surface: ok");
+    return s_fail;
+}
+
 int main(int argc, char **argv)
 {
     Nv2aVkStats st;
 
     if (argc > 1 && strcmp(argv[1], "shows") == 0)
         return shows_main();
+    if (argc > 1 && strcmp(argv[1], "shown") == 0)
+        return shown_main();
 #if defined(_WIN32)
     if (argc > 1 && strcmp(argv[1], "present") == 0)
         return present_main();
