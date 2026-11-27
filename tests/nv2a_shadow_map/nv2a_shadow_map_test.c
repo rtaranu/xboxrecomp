@@ -171,9 +171,11 @@ int main(void)
             memcpy(s_mem + TEX_AT + 4u * (y * W + x), &word, 4);
         }
     light(TEX_AT, 1, 0.0f);
-    printf("memory: x=0 %d x=15 %d\n", gray(0, 8), gray(15, 8));
-    CHECK(gray(0, 8) == 255 && gray(15, 8) == 0,
-          "memory: x=0 %d x=15 %d, want 255 and 0", gray(0, 8), gray(15, 8));
+    printf("memory: x=0 %d x=7 %d x=8 %d x=15 %d\n", gray(0, 8), gray(7, 8), gray(8, 8),
+           gray(15, 8));
+    for (x = 0; x < W; x++)                        /* a texel is a word */
+        CHECK(gray((int)x, 8) == (x < W / 2 ? 255 : 0), "memory (%u,8) is %d, want %d",
+              x, gray((int)x, 8), x < W / 2 ? 255 : 0);
 
     if (!s_fail)
         printf("nv2a shadow map: ok\n");

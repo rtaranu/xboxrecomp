@@ -2615,7 +2615,7 @@ static uint32_t depth_texel_bits(uint32_t fmt)
 static float depth_texel(const Texture *t, int32_t u, int32_t v, uint32_t bits)
 {
     const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset();
-    uint32_t bpp = bits / 8, word = 0;
+    uint32_t bpp = bits == 24 ? 4 : 2, word = 0;  /* D24S8: depth and stencil in a word */
     int i;
 
     if (t->border_color
