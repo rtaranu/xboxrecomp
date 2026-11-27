@@ -2852,7 +2852,8 @@ typedef struct {
     uint32_t bpp;
     const Nv2aVshOutput *va, *vb, *vc;
     const float *a, *b, *c;
-    float iw[3], uv[3][2], stc[3][4][4], vfog[3], fogc[4], inv_area;
+    float iw[3], uv[3][2], stc[3][4][4], vfog[3], fogc[4];
+    double inv_area;
     float dl[3][2];                  /* d(l0,l1,l2)/dx and /dy, for texel gradients */
     float *zb;
     int minx, maxx, miny, maxy, use_rc, textured;
@@ -2904,17 +2905,23 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
     tex_filter_config(&bilinear, &aniso);
     for (y = y0; y < T->maxy; y += step) {
         for (x = T->minx; x < T->maxx; x++) {
-            float px = (float)x + 0.5f, py = (float)y + 0.5f;
-            float w0 = (b[0] - a[0]) * (py - a[1]) - (b[1] - a[1]) * (px - a[0]);
-            float w1 = (c[0] - b[0]) * (py - b[1]) - (c[1] - b[1]) * (px - b[0]);
-            float w2 = (a[0] - c[0]) * (py - c[1]) - (a[1] - c[1]) * (px - c[0]);
+            /* In doubles: a corner the near plane cut can lie 1e5 pixels off
+             * the screen, where the floats' products leave its weight at a
+             * visible pixel mostly rounding, and its large 1/w turns that
+             * into texture coordinates many texels off, in a grid. */
+            double px = (double)x + 0.5, py = (double)y + 0.5;
+            double w0 = ((double)b[0] - a[0]) * (py - a[1]) - ((double)b[1] - a[1]) * (px - a[0]);
+            double w1 = ((double)c[0] - b[0]) * (py - b[1]) - ((double)c[1] - b[1]) * (px - b[0]);
+            double w2 = ((double)a[0] - c[0]) * (py - c[1]) - ((double)a[1] - c[1]) * (px - c[0]);
             float l0, l1, l2, z, col[4], pw;
             uint32_t argb;
             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0)
                || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
                 continue;
             /* w1 is opposite a, w2 opposite b, w0 opposite c. */
-            l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
+            l0 = (float)(w1 * T->inv_area);
+            l1 = (float)(w2 * T->inv_area);
+            l2 = (float)(w0 * T->inv_area);
             /* Equal depths stay exact: l0 + l1 + l2 is not 1 in floats, and
              * a flat quad at the far plane would fail LEQUAL against a
              * buffer cleared to it, pixel by pixel. */
@@ -3394,7 +3401,8 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
         return;
     }
     s_gpu.xf_drawn++;
-    T.inv_area = 1.0f / area;
+    T.inv_area = 1.0 / (((double)b[0] - a[0]) * ((double)c[1] - a[1])
+                      - ((double)b[1] - a[1]) * ((double)c[0] - a[0]));
     T.flat_z = a[2] == b[2] && b[2] == c[2];
     /* The edge functions are linear, so a barycentric moves by a constant per
      * pixel step. l0 = w1/area, l1 = w2/area, l2 = w0/area as in xf_rows. */
