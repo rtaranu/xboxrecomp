@@ -175,6 +175,21 @@ where unclipped ones do. The framebuffer window takes every other pixel of a
 2×-wide surface instead of showing it black, and the host-side depth buffer is
 wide enough for 1280×960.
 
+## Face Culling
+
+With `SET_CULL_FACE_ENABLE` on, the CPU rasteriser drops the faces
+`SET_CULL_FACE` names (`FRONT`, `BACK` or both), the front being clockwise on
+the screen when `SET_FRONT_FACE` is `CW`, else counter-clockwise. A strip's
+every second triangle comes with its corners in the other order and is
+turned back. The facing is the sign of the determinant of the corners in
+clip space, which is the winding of the part in front of the eye, as on a
+GPU that clips first. The three projected corners can say otherwise when
+one is behind the eye, and culled a ceiling triangle a GPU draws, so the CPU
+rasteriser does not follow the "cull from projected positions" note under
+Render Back Ends. Before this every face was drawn, and the far sides of
+thin meshes drawn into a shadow map thickened their shadows.
+`tests/nv2a_cull` checks it.
+
 ## Index Width
 
 The index list was `uint16_t` and held 4096 entries, but `DRAW_ARRAYS` starts
