@@ -218,6 +218,15 @@ Render Back Ends. Before this every face was drawn, and the far sides of
 thin meshes drawn into a shadow map thickened their shadows.
 `tests/nv2a_cull` checks it.
 
+## Interpolation
+
+The CPU rasteriser interpolates texture coordinates, colours (diffuse and
+specular) and the fog factor in perspective, weighted by 1/w, as a GPU does.
+Colours and fog used to be linear on the screen. That is close for small
+triangles, but a triangle with clipped near corners far off the surface took
+its colour from the far corner alone: light beams coloured at the window and
+black at their far end came out black. `tests/nv2a_persp_color` checks it.
+
 ## Anti-Aliased Surfaces
 
 With multisampling on, the surface is 2× (or 2×2) the logical size, and
