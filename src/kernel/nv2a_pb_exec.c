@@ -198,6 +198,27 @@ static int surface_write_refused(uint32_t base, uint32_t bytes, const char *what
 #define NV097_SET_TEXTURE_ADDRESS         0x1B08
 #define NV097_SET_TEXTURE_CONTROL1        0x1B10
 #define NV097_SET_TEXTURE_IMAGE_RECT      0x1B1C
+
+/* The 2D classes' methods this executor acts on. */
+#define NV_CONTEXT_SURFACES_2D                           0x0062
+#define NV062_SET_CONTEXT_DMA_IMAGE_SOURCE                 0x00000184
+#define NV062_SET_CONTEXT_DMA_IMAGE_DESTIN                 0x00000188
+#define NV062_SET_COLOR_FORMAT                             0x00000300
+#define NV062_SET_COLOR_FORMAT_LE_Y8                    0x01
+#define NV062_SET_COLOR_FORMAT_LE_R5G6B5                0x04
+#define NV062_SET_COLOR_FORMAT_LE_X8R8G8B8_Z8R8G8B8     0x06
+#define NV062_SET_COLOR_FORMAT_LE_X8R8G8B8              0x07
+#define NV062_SET_COLOR_FORMAT_LE_A8R8G8B8              0x0A
+#define NV062_SET_COLOR_FORMAT_LE_Y32                   0x0B
+#define NV062_SET_PITCH                                    0x00000304
+#define NV062_SET_OFFSET_SOURCE                            0x00000308
+#define NV062_SET_OFFSET_DESTIN                            0x0000030C
+#define NV_IMAGE_BLIT                                    0x009F
+#define NV09F_SET_OPERATION                                0x000002FC
+#define NV09F_SET_OPERATION_SRCCOPY                        3
+#define NV09F_CONTROL_POINT_IN                             0x00000300
+#define NV09F_CONTROL_POINT_OUT                            0x00000304
+#define NV09F_SIZE                                         0x00000308
 /* The buffer flip. A title double-buffers by telling the GPU which buffer
  * the CRTC reads and which it draws into, advancing the write index and
  * then stalling until the flip has happened. Ignoring these means the
@@ -4732,18 +4753,27 @@ static uint32_t s_subch_class[8];
 static uint32_t s_sem_base, s_sem_limit;
 static int s_sem_taken;       /* the object has taken a release since bound */
 
-static void semaphore_object(uint32_t handle)
+/* A linear DMA object's physical start and its last byte's offset; 0 if the
+ * handle names none that is present. */
+static int dma_object_range(uint32_t handle, uint32_t *phys, uint32_t *limit)
 {
-    uint32_t inst = object_instance(handle), base = 0, limit = 0;
+    uint32_t inst = object_instance(handle);
     volatile uint32_t *o = inst ? xbox_Nv2aRegPtr(inst) : NULL;
 
-    if (o && xbox_Nv2aRegPtr(inst + 8) && (o[0] & 0x3000u) == 0x3000u) {
-        /* flags with the start's offset in its page; the limit; the page */
-        uint32_t phys = (o[2] & ~0xFFFu) + (o[0] >> 20);
+    if (!o || !xbox_Nv2aRegPtr(inst + 8) || (o[0] & 0x3000u) != 0x3000u)
+        return 0;
+    /* flags with the start's offset in its page; the limit; the page */
+    *phys = (o[2] & ~0xFFFu) + (o[0] >> 20);
+    *limit = o[1];
+    return 1;
+}
 
+static void semaphore_object(uint32_t handle)
+{
+    uint32_t base = 0, limit = 0, phys;
+
+    if (dma_object_range(handle, &phys, &limit))
         base = XBOX_CONTIG_BASE | (phys & 0x0FFFFFFFu);
-        limit = o[1];
-    }
     if (base != s_sem_base || limit != s_sem_limit) {
         fprintf(stderr, "[PB] semaphore object 0x%X: 0x%08X, limit 0x%X%c",
                 handle, base, limit, 10);
@@ -4751,6 +4781,143 @@ static void semaphore_object(uint32_t handle)
     }
     s_sem_base = base;
     s_sem_limit = limit;
+}
+
+/* 2D copies: a CONTEXT_SURFACES_2D object (class 0x62) names the source and
+ * destination surfaces, an IMAGE_BLIT object (class 0x9F) copies a rectangle
+ * between them when SIZE arrives. D3D's CopyRects uses them, and so does
+ * PersistDisplay, whose copy the next boot reads back. One state for all
+ * objects: a title binds one of each. Only SRCCOPY is modelled. */
+static struct {
+    uint32_t src_phys, src_limit, dst_phys, dst_limit;
+    int src_dma, dst_dma;                  /* the object was resolved */
+    uint32_t format, pitch, off_src, off_dst;
+    uint32_t operation, point_in, point_out;
+    int operation_set;
+} s_blit;
+
+static uint32_t blit_bpp(uint32_t format)
+{
+    switch (format) {
+    case NV062_SET_COLOR_FORMAT_LE_Y8:                return 1;
+    case NV062_SET_COLOR_FORMAT_LE_R5G6B5:            return 2;
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8_Z8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_X8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_A8R8G8B8:
+    case NV062_SET_COLOR_FORMAT_LE_Y32:               return 4;
+    default:                                          return 0;
+    }
+}
+
+/* Is the span [off, off + bytes) inside a DMA object of this limit? */
+static int blit_in_object(int known, uint32_t limit, uint64_t off, uint64_t bytes)
+{
+    return !known || off + bytes <= (uint64_t)limit + 1u;
+}
+
+static void image_blit(uint32_t size)
+{
+    uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+    uint32_t w = size & 0xFFFFu, h = size >> 16;
+    uint32_t sx = s_blit.point_in & 0xFFFFu, sy = s_blit.point_in >> 16;
+    uint32_t dx = s_blit.point_out & 0xFFFFu, dy = s_blit.point_out >> 16;
+    uint32_t spitch = s_blit.pitch & 0xFFFFu, dpitch = s_blit.pitch >> 16;
+    uint32_t bpp = blit_bpp(s_blit.format), row, y;
+    uint64_t sfirst, dfirst, sspan, dspan;
+    uint32_t sbase, dbase;
+    static int said, skipped;
+
+    if (!w || !h || s_draws_off)
+        return;
+    if (!s_blit.operation_set
+            || s_blit.operation != NV09F_SET_OPERATION_SRCCOPY || !bpp) {
+        if (skipped++ < 4)
+            fprintf(stderr, "[PB] image blit not modelled: operation %u%s,"
+                    " colour format 0x%X%c", s_blit.operation,
+                    s_blit.operation_set ? "" : " (never set)",
+                    s_blit.format, 10);
+        return;
+    }
+    /* A back end keeps its surfaces itself; guest memory may not hold them. */
+    if (backend_draws()) {
+        if (skipped++ < 4)
+            fprintf(stderr, "[PB] image blit skipped: the back end draws%c", 10);
+        return;
+    }
+    row = w * bpp;
+    sfirst = s_blit.off_src + (uint64_t)sy * spitch + (uint64_t)sx * bpp;
+    dfirst = s_blit.off_dst + (uint64_t)dy * dpitch + (uint64_t)dx * bpp;
+    sspan = (uint64_t)(h - 1) * spitch + row;
+    dspan = (uint64_t)(h - 1) * dpitch + row;
+    if (!blit_in_object(s_blit.src_dma, s_blit.src_limit, sfirst, sspan)
+            || !blit_in_object(s_blit.dst_dma, s_blit.dst_limit, dfirst, dspan)) {
+        if (skipped++ < 4)
+            fprintf(stderr, "[PB] image blit past its DMA object: %ux%u"
+                    " from 0x%X to 0x%X%c", w, h, s_blit.off_src,
+                    s_blit.off_dst, 10);
+        return;
+    }
+    /* Surfaces are resolved as the 3D class resolves its colour offset. */
+    sbase = dma_resolve(s_blit.src_phys + s_blit.off_src);
+    dbase = dma_resolve(s_blit.dst_phys + s_blit.off_dst);
+    sfirst -= s_blit.off_src;
+    dfirst -= s_blit.off_dst;
+    if (!guest_span_ok(sbase + sfirst, (uint32_t)sspan)
+            || surface_write_refused((uint32_t)(dbase + dfirst),
+                                     (uint32_t)dspan, "blit to"))
+        return;
+    if (!said++)
+        fprintf(stderr, "[PB] image blit: first copy %ux%u, 0x%08X to"
+                " 0x%08X%c", w, h, sbase, dbase, 10);
+    {
+        uint8_t *s = mem + sbase + sfirst, *d = mem + dbase + dfirst;
+
+        /* Bottom up when the destination starts later in the same memory,
+         * so an overlapping copy reads each row before it is written. */
+        if (d > s)
+            for (y = h; y-- > 0; )
+                memmove(d + (size_t)y * dpitch, s + (size_t)y * spitch, row);
+        else
+            for (y = 0; y < h; y++)
+                memmove(d + (size_t)y * dpitch, s + (size_t)y * spitch, row);
+    }
+}
+
+/* Methods of the 2D classes; 0 if not one of theirs. */
+static int blit_method(uint32_t cls, uint32_t method, uint32_t param)
+{
+    if (cls == NV_CONTEXT_SURFACES_2D) {
+        switch (method) {
+        case NV062_SET_CONTEXT_DMA_IMAGE_SOURCE:
+            s_blit.src_phys = 0;
+            s_blit.src_dma = dma_object_range(param, &s_blit.src_phys,
+                                              &s_blit.src_limit);
+            return 1;
+        case NV062_SET_CONTEXT_DMA_IMAGE_DESTIN:
+            s_blit.dst_phys = 0;
+            s_blit.dst_dma = dma_object_range(param, &s_blit.dst_phys,
+                                              &s_blit.dst_limit);
+            return 1;
+        case NV062_SET_COLOR_FORMAT:  s_blit.format = param;  return 1;
+        case NV062_SET_PITCH:         s_blit.pitch = param;   return 1;
+        case NV062_SET_OFFSET_SOURCE: s_blit.off_src = param; return 1;
+        case NV062_SET_OFFSET_DESTIN: s_blit.off_dst = param; return 1;
+        default: return 0;
+        }
+    }
+    if (cls == NV_IMAGE_BLIT) {
+        switch (method) {
+        case NV09F_SET_OPERATION:
+            s_blit.operation = param;
+            s_blit.operation_set = 1;
+            return 1;
+        case NV09F_CONTROL_POINT_IN:  s_blit.point_in = param;  return 1;
+        case NV09F_CONTROL_POINT_OUT: s_blit.point_out = param; return 1;
+        case NV09F_SIZE:              image_blit(param);        return 1;
+        default: return 0;
+        }
+    }
+    return 0;
 }
 
 void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
@@ -4885,6 +5052,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         return;
     }
     if (subch != 0) {                      /* 3D class lives on subchannel 0 */
+        if (blit_method(s_subch_class[subch & 7u], method, param))
+            return;
         note_unhandled(method, param);
         return;
     }
