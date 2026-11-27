@@ -3049,14 +3049,16 @@ static void xf_rows_owned(const XfTri *tris, int ntris, int k, int n,
 static int s_raster_last_workers = 1;
 int nv2a_raster_last_workers(void) { return s_raster_last_workers; }
 
+/* One piece of work for the pool: thread k of n does its share. The caller
+ * is thread n - 1 and returns once every share is done. */
+typedef void (*PoolJob)(int k, int n);
+
 #if defined(_WIN32)
 static struct {
     int n;                                  /* threads incl. the caller */
     HANDLE start[NV_RASTER_MAX_THREADS], done;
     volatile LONG pending;
-    const XfTri *tris;
-    int ntris;
-    XfCount cnt[NV_RASTER_MAX_THREADS];
+    PoolJob job;
 } s_pool;
 
 static DWORD WINAPI raster_worker(LPVOID arg)
@@ -3064,8 +3066,7 @@ static DWORD WINAPI raster_worker(LPVOID arg)
     int k = (int)(intptr_t)arg;
     for (;;) {
         WaitForSingleObject(s_pool.start[k], INFINITE);
-        memset(&s_pool.cnt[k], 0, sizeof s_pool.cnt[k]);
-        xf_rows_owned(s_pool.tris, s_pool.ntris, k, s_pool.n, &s_pool.cnt[k]);
+        s_pool.job(k, s_pool.n);
         if (InterlockedDecrement(&s_pool.pending) == 0)
             SetEvent(s_pool.done);
     }
@@ -3097,40 +3098,17 @@ static int raster_pool_size(void)
     return s_pool.n;
 }
 
-static void xf_rows_parallel(const XfTri *T, int ntris, long px,
-                             XfCount *total)
+/* Only with raster_pool_size() > 1. */
+static void pool_run(PoolJob job)
 {
-    int n = raster_pool_size(), k;
+    int n = s_pool.n, k;
 
-    if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
-        s_raster_last_workers = 1;
-        for (k = 0; k < ntris; k++)
-            xf_rows(&T[k], T[k].miny, 1, total);
-        return;
-    }
-    s_pool.tris = T;
-    s_pool.ntris = ntris;
+    s_pool.job = job;
     s_pool.pending = n - 1;
     for (k = 0; k < n - 1; k++)
         SetEvent(s_pool.start[k]);
-    {
-        XfCount mine = {0, 0, 0};
-        xf_rows_owned(T, ntris, n - 1, n, &mine);
-        WaitForSingleObject(s_pool.done, INFINITE);
-        total->depth_fail += mine.depth_fail;
-        total->pixels += mine.pixels;
-        total->zpass += mine.zpass;
-    }
-    {
-        int ran = 1;                          /* the caller always draws */
-        for (k = 0; k < n - 1; k++) {
-            if (s_pool.cnt[k].pixels) ran++;
-            total->depth_fail += s_pool.cnt[k].depth_fail;
-            total->pixels += s_pool.cnt[k].pixels;
-            total->zpass += s_pool.cnt[k].zpass;
-        }
-        s_raster_last_workers = ran;
-    }
+    job(n - 1, n);
+    WaitForSingleObject(s_pool.done, INFINITE);
 }
 #else
 /* The same pool on pthreads. One mutex and two conditions rather than a
@@ -3144,9 +3122,7 @@ static struct {
     pthread_cond_t start, done;
     unsigned long generation;
     int pending;
-    const XfTri *tris;
-    int ntris;
-    XfCount cnt[NV_RASTER_MAX_THREADS];
+    PoolJob job;
 } s_pool;
 
 static void *raster_worker(void *arg)
@@ -3154,14 +3130,16 @@ static void *raster_worker(void *arg)
     int k = (int)(intptr_t)arg;
     unsigned long seen = 0;
     for (;;) {
+        PoolJob job;
+
         pthread_mutex_lock(&s_pool.lock);
         while (s_pool.generation == seen)
             pthread_cond_wait(&s_pool.start, &s_pool.lock);
         seen = s_pool.generation;
+        job = s_pool.job;
         pthread_mutex_unlock(&s_pool.lock);
 
-        memset(&s_pool.cnt[k], 0, sizeof s_pool.cnt[k]);
-        xf_rows_owned(s_pool.tris, s_pool.ntris, k, s_pool.n, &s_pool.cnt[k]);
+        job(k, s_pool.n);
 
         pthread_mutex_lock(&s_pool.lock);
         if (--s_pool.pending == 0)
@@ -3206,10 +3184,41 @@ static int raster_pool_size(void)
     return s_pool.n;
 }
 
+/* Only with raster_pool_size() > 1. */
+static void pool_run(PoolJob job)
+{
+    int n = s_pool.n;
+
+    pthread_mutex_lock(&s_pool.lock);
+    s_pool.job = job;
+    s_pool.pending = n - 1;
+    s_pool.generation++;
+    pthread_cond_broadcast(&s_pool.start);
+    pthread_mutex_unlock(&s_pool.lock);
+
+    job(n - 1, n);                                  /* the caller's share */
+    pthread_mutex_lock(&s_pool.lock);
+    while (s_pool.pending != 0)
+        pthread_cond_wait(&s_pool.done, &s_pool.lock);
+    pthread_mutex_unlock(&s_pool.lock);
+}
+#endif
+
+/* The run of triangles pool_run hands to rows_job, and each thread's counts. */
+static const XfTri *s_rows_tris;
+static int s_rows_ntris;
+static XfCount s_rows_cnt[NV_RASTER_MAX_THREADS];
+
+static void rows_job(int k, int n)
+{
+    memset(&s_rows_cnt[k], 0, sizeof s_rows_cnt[k]);
+    xf_rows_owned(s_rows_tris, s_rows_ntris, k, n, &s_rows_cnt[k]);
+}
+
 static void xf_rows_parallel(const XfTri *T, int ntris, long px,
                              XfCount *total)
 {
-    int n = raster_pool_size(), k;
+    int n = raster_pool_size(), k, ran = 1;     /* the caller always draws */
 
     if (n <= 1 || px < NV_RASTER_MT_MIN_PIXELS) {
         s_raster_last_workers = 1;
@@ -3217,39 +3226,17 @@ static void xf_rows_parallel(const XfTri *T, int ntris, long px,
             xf_rows(&T[k], T[k].miny, 1, total);
         return;
     }
-
-    pthread_mutex_lock(&s_pool.lock);
-    s_pool.tris = T;
-    s_pool.ntris = ntris;
-    s_pool.pending = n - 1;
-    s_pool.generation++;
-    pthread_cond_broadcast(&s_pool.start);
-    pthread_mutex_unlock(&s_pool.lock);
-
-    {
-        XfCount mine = {0, 0, 0};
-        xf_rows_owned(T, ntris, n - 1, n, &mine);   /* the caller's share */
-        pthread_mutex_lock(&s_pool.lock);
-        while (s_pool.pending != 0)
-            pthread_cond_wait(&s_pool.done, &s_pool.lock);
-        pthread_mutex_unlock(&s_pool.lock);
-        total->depth_fail += mine.depth_fail;
-        total->pixels += mine.pixels;
-        total->zpass += mine.zpass;
+    s_rows_tris = T;
+    s_rows_ntris = ntris;
+    pool_run(rows_job);
+    for (k = 0; k < n; k++) {
+        if (k < n - 1 && s_rows_cnt[k].pixels) ran++;
+        total->depth_fail += s_rows_cnt[k].depth_fail;
+        total->pixels += s_rows_cnt[k].pixels;
+        total->zpass += s_rows_cnt[k].zpass;
     }
-
-    {
-        int ran = 1;                          /* the caller always draws */
-        for (k = 0; k < n - 1; k++) {
-            if (s_pool.cnt[k].pixels) ran++;
-            total->depth_fail += s_pool.cnt[k].depth_fail;
-            total->pixels += s_pool.cnt[k].pixels;
-            total->zpass += s_pool.cnt[k].zpass;
-        }
-        s_raster_last_workers = ran;
-    }
+    s_raster_last_workers = ran;
 }
-#endif
 
 int nv2a_raster_pool_size(void) { return raster_pool_size(); }
 
@@ -3629,15 +3616,63 @@ static void xf_set_viewport(void)
     s_xf_o[2] = of[2];
 }
 
+/* Transforming a batch's vertices on the pool. Each vertex reads only the
+ * batch's state and writes only its own s_xf slot, so blocks of vertices go
+ * to the threads in turn; otherwise the executor thread transforms alone
+ * while the fill threads wait. Smaller batches stay on the executor thread,
+ * where the wake would cost more than it saves. */
+#define NV_XF_MT_MIN_VERTS 128
+#define NV_XF_MT_BLOCK 32
+static uint32_t s_verts_count;
+static int s_verts_failed[NV_RASTER_MAX_THREADS];
+
+static void verts_job(int k, int n)
+{
+    uint32_t b, i, end;
+
+    s_verts_failed[k] = 0;
+    for (b = (uint32_t)k * NV_XF_MT_BLOCK; b < s_verts_count;
+         b += (uint32_t)n * NV_XF_MT_BLOCK) {
+        end = b + NV_XF_MT_BLOCK < s_verts_count ? b + NV_XF_MT_BLOCK
+                                                 : s_verts_count;
+        for (i = b; i < end; i++)
+            if (!transform_vertex(s_gpu.idx[i], &s_xf[i])) {
+                s_verts_failed[k] = 1;
+                return;
+            }
+    }
+}
+
+/* Nonzero when every vertex of the batch is in s_xf. A program that writes
+ * constants runs on this thread, in order: later vertices read them. */
+static int transform_batch(uint32_t n)
+{
+    uint32_t i;
+    int threads = raster_pool_size(), k;
+
+    if (threads > 1 && n >= NV_XF_MT_MIN_VERTS
+        && (!batch_uses_program() || nv2a_vsh_threads_ok())) {
+        s_verts_count = n;
+        pool_run(verts_job);
+        for (k = 0; k < threads; k++)
+            if (s_verts_failed[k])
+                return 0;
+        return 1;
+    }
+    for (i = 0; i < n; i++)
+        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
+            return 0;
+    return 1;
+}
+
 static void raster_batch_program(void)
 {
     uint32_t i, n = s_gpu.idx_count;
 
     if (!s_xf && !(s_xf = (Nv2aVshOutput *)calloc(NV_MAX_INDICES, sizeof *s_xf)))
         return;
-    for (i = 0; i < n; i++)
-        if (!transform_vertex(s_gpu.idx[i], &s_xf[i]))
-            return;                                    /* no program loaded */
+    if (!transform_batch(n))
+        return;                                        /* no program loaded */
     xf_set_viewport();
     {
         const VertexAttr *tc = texcoord_attr();

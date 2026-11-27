@@ -591,19 +591,37 @@ static int vsh_run_decoded(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *ou
 
 static int vsh_run_fields(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
 
-int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+/* 0 fields, 1 decoded, 2 both, compared. */
+static int vsh_mode(void)
 {
-    static int mode = -1;            /* 0 fields, 1 decoded, 2 both, compared */
+    static int mode = -1;
 
     if (mode < 0) {
         const char *d = getenv("RECOMP_VSH_DECODED");
         const char *c = getenv("RECOMP_VSH_CHECK");
-        mode = (d && d[0] == '0') ? 0 : 1;
+        int m = (d && d[0] == '0') ? 0 : 1;
         if (c && c[0] == '1')
-            mode = 2;
+            m = 2;
         if (getenv("RECOMP_VSH_DUMP"))
-            mode = 0;
+            m = 0;
+        mode = m;
     }
+    return mode;
+}
+
+int nv2a_vsh_threads_ok(void)
+{
+    if (vsh_mode() != 1 || s_cxt_write)
+        return 0;
+    if (!s_dec_valid || s_dec_rev != s_program_revision)
+        dec_program();
+    return 1;
+}
+
+int nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out)
+{
+    int mode = vsh_mode();
+
     if (mode == 1)
         return vsh_run_decoded(in, out);
     if (mode == 2 && !s_cxt_write) {

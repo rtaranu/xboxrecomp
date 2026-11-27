@@ -50,6 +50,12 @@ void nv2a_vsh_set_cxt_write(uint32_t enable);         /* _CXT_WRITE_EN      */
  * transform this batch" rather than drawing garbage. */
 int  nv2a_vsh_run(const float in[NV2A_VSH_INPUTS][4], Nv2aVshOutput *out);
 
+/* Nonzero when nv2a_vsh_run may run on several threads at once until the
+ * program or a constant changes: it decodes the program now. Zero while the
+ * program writes constants (later vertices read them) or a debug mode that
+ * keeps its own state is on. Call it from the thread that loads programs. */
+int  nv2a_vsh_threads_ok(void);
+
 /* The RCC instruction's result for x: 1/x, its size clamped to the range
  * the NV2A gives. The fixed-function transform divides by w with it. */
 float nv2a_vsh_rcc(float x);
