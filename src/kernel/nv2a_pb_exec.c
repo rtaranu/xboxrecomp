@@ -2879,6 +2879,7 @@ typedef struct {
     float *zb;
     int minx, maxx, miny, maxy, use_rc, textured;
     int flat_z;                      /* all three depths equal */
+    float zoff, zmax;                /* polygon offset, and the depth range it stays in */
 } XfTri;
 
 typedef struct { uint64_t depth_fail, pixels; uint32_t zpass; } XfCount;
@@ -2947,6 +2948,10 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
              * a flat quad at the far plane would fail LEQUAL against a
              * buffer cleared to it, pixel by pixel. */
             z = T->flat_z ? a[2] : l0 * a[2] + l1 * b[2] + l2 * c[2];
+            if (T->zoff != 0.0f) {
+                z += T->zoff;
+                z = z < 0.0f ? 0.0f : (z > T->zmax ? T->zmax : z);
+            }
             {
                 float *zp = T->zb ? &T->zb[(size_t)y * NV_ZBUF_W + x] : NULL;
                 int shade = (s_gpu.color_mask & 0x01010101u) || s_gpu.alpha_test;
@@ -3430,6 +3435,19 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
     T.dl[0][0] = -(c[1] - b[1]) * T.inv_area;  T.dl[0][1] = (c[0] - b[0]) * T.inv_area;
     T.dl[1][0] = -(a[1] - c[1]) * T.inv_area;  T.dl[1][1] = (a[0] - c[0]) * T.inv_area;
     T.dl[2][0] = -(b[1] - a[1]) * T.inv_area;  T.dl[2][1] = (b[0] - a[0]) * T.inv_area;
+    /* Polygon offset for filled triangles (shadow maps use it so a surface
+     * does not shadow itself): SCALE_FACTOR times the steeper of the depth
+     * slopes per pixel, plus BIAS depth steps. Depth here is in the buffer's
+     * own units, so one step is 1 for Z16 and Z24 alike. */
+    if (s_reg[0x0338 / 4] & 1) {             /* SET_POLY_OFFSET_FILL_ENABLE */
+        double dzdx = T.dl[0][0] * (double)a[2] + T.dl[1][0] * (double)b[2]
+                    + T.dl[2][0] * (double)c[2];
+        double dzdy = T.dl[0][1] * (double)a[2] + T.dl[1][1] * (double)b[2]
+                    + T.dl[2][1] * (double)c[2];
+        double m = fmax(fabs(dzdx), fabs(dzdy));
+        T.zoff = (float)(reg_f(0x0384) * m + reg_f(0x0388));  /* SCALE_FACTOR, BIAS */
+        T.zmax = ((s_gpu.format >> 4) & 0xF) == 1 ? 65535.0f : 16777215.0f;
+    }
 
     xf_queue_push(&T);
     (void)cnt;
