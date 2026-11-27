@@ -202,6 +202,22 @@ depth in the top 24 bits and 0 for the stencil, which is not kept. Float depths 
 map drawn into a w-buffer (`SET_CONTROL0`'s `Z_PERSPECTIVE_ENABLE`) holds
 other numbers than the hardware's. `tests/nv2a_shadow_map` checks it.
 
+## Face Culling
+
+With `SET_CULL_FACE_ENABLE` on, the CPU rasteriser drops the faces
+`SET_CULL_FACE` names (`FRONT`, `BACK` or both), the front being clockwise on
+the screen when `SET_FRONT_FACE` is `CW`, else counter-clockwise. A strip's
+every second triangle comes with its corners in the other order and is
+turned back. The facing is the sign of the determinant of the corners in
+clip space, which is the winding of the part in front of the eye, as on a
+GPU that clips first (the Vulkan back end's result). The three projected
+corners can say otherwise when one is behind the eye: in Splinter Cell's
+office that culled a ceiling triangle the Vulkan back end draws, so the CPU
+rasteriser does not follow the "cull from projected positions" note under
+Render Back Ends. Before this every face was drawn, and the far sides of
+thin meshes drawn into a shadow map thickened their shadows.
+`tests/nv2a_cull` checks it.
+
 ## Anti-Aliased Surfaces
 
 With multisampling on, the surface is 2× (or 2×2) the logical size, and

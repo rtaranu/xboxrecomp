@@ -3482,8 +3482,38 @@ static int xf_clip_poly(const Nv2aVshOutput *in, int n, int pl,
     return m;
 }
 
+/* SET_CULL_FACE_ENABLE: is triangle (a, b, c) a face culled? Clockwise on the
+ * screen (y down) is the front with SET_FRONT_FACE CW (0x900). `odd` is a
+ * strip's every second triangle, whose corners come in the other order.
+ * Decided as a GPU that clips first does, from what is in front of the eye:
+ * the sign of the determinant of the corners in clip space, (x w, y w, w),
+ * is the winding of every part of the triangle the clipper keeps, and needs
+ * no clipping. A back end decides for itself. */
+static int xf_culled(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
+                     const Nv2aVshOutput *c, int odd)
+{
+    uint32_t face = s_reg[0x039C / 4];
+    double aw = a->pos[3], bw = b->pos[3], cw = c->pos[3];
+    double ax = a->pos[0] * aw, ay = a->pos[1] * aw;
+    double bx = b->pos[0] * bw, by = b->pos[1] * bw;
+    double cx = c->pos[0] * cw, cy = c->pos[1] * cw, det;
+    int front;
+
+    if (!s_reg[0x0308 / 4] || backend_draws())
+        return 0;
+    if (face == 0x408)                              /* FRONT_AND_BACK */
+        return 1;
+    det = ax * (by * cw - cy * bw) - ay * (bx * cw - cx * bw) + aw * (bx * cy - cx * by);
+    if (!(det != 0.0))                              /* edge-on or NaN: the rasteriser's */
+        return 0;
+    front = (det > 0.0) != (odd != 0);
+    if (s_reg[0x03A0 / 4] != 0x900)                 /* front faces counter-clockwise */
+        front = !front;
+    return face == 0x404 ? front : !front;          /* FRONT, else BACK */
+}
+
 static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
-                              const Nv2aVshOutput *c)
+                              const Nv2aVshOutput *c, int odd)
 {
     static int near_z = -1;
     const Nv2aVshOutput *in[3];
@@ -3494,6 +3524,8 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
         const char *e = getenv("RECOMP_CLIP_NEAR_Z");
         near_z = !(e && e[0] == '0');
     }
+    if (xf_culled(a, b, c, odd))
+        return;
     planes = near_z ? 2 : 1;
     in[0] = a; in[1] = b; in[2] = c;
     for (i = 0; i < 3; i++) {
@@ -3702,31 +3734,31 @@ static void raster_batch_program(void)
     switch (s_gpu.prim) {
     case NV_PRIM_TRIANGLES:
         for (i = 0; i + 2 < n; i += 3)
-            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
+            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2], 0);
         break;
     case NV_PRIM_TRIANGLE_STRIP:
         for (i = 0; i + 2 < n; i++) {
             if ((i & 1) && strip_alt_winding())
-                raster_xf_clipped(&s_xf[i+1], &s_xf[i], &s_xf[i+2]);
+                raster_xf_clipped(&s_xf[i+1], &s_xf[i], &s_xf[i+2], 0);
             else
-                raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
+                raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2], (int)(i & 1));
         }
         break;
     case NV_PRIM_TRIANGLE_FAN:
     case NV_PRIM_POLYGON:
         for (i = 1; i + 1 < n; i++)
-            raster_xf_clipped(&s_xf[0], &s_xf[i], &s_xf[i+1]);
+            raster_xf_clipped(&s_xf[0], &s_xf[i], &s_xf[i+1], 0);
         break;
     case NV_PRIM_QUADS:
         for (i = 0; i + 3 < n; i += 4) {
-            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2]);
-            raster_xf_clipped(&s_xf[i], &s_xf[i+2], &s_xf[i+3]);
+            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+2], 0);
+            raster_xf_clipped(&s_xf[i], &s_xf[i+2], &s_xf[i+3], 0);
         }
         break;
     case NV_PRIM_QUAD_STRIP:
         for (i = 0; i + 3 < n; i += 2) {
-            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+3]);
-            raster_xf_clipped(&s_xf[i], &s_xf[i+3], &s_xf[i+2]);
+            raster_xf_clipped(&s_xf[i], &s_xf[i+1], &s_xf[i+3], 0);
+            raster_xf_clipped(&s_xf[i], &s_xf[i+3], &s_xf[i+2], 0);
         }
         break;
     default:
