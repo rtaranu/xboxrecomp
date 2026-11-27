@@ -2856,6 +2856,7 @@ typedef struct {
     float dl[3][2];                  /* d(l0,l1,l2)/dx and /dy, for texel gradients */
     float *zb;
     int minx, maxx, miny, maxy, use_rc, textured;
+    int flat_z;                      /* all three depths equal */
 } XfTri;
 
 typedef struct { uint64_t depth_fail, pixels; uint32_t zpass; } XfCount;
@@ -2914,7 +2915,10 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
                 continue;
             /* w1 is opposite a, w2 opposite b, w0 opposite c. */
             l0 = w1 * T->inv_area; l1 = w2 * T->inv_area; l2 = w0 * T->inv_area;
-            z = l0 * a[2] + l1 * b[2] + l2 * c[2];
+            /* Equal depths stay exact: l0 + l1 + l2 is not 1 in floats, and
+             * a flat quad at the far plane would fail LEQUAL against a
+             * buffer cleared to it, pixel by pixel. */
+            z = T->flat_z ? a[2] : l0 * a[2] + l1 * b[2] + l2 * c[2];
             {
                 float *zp = T->zb ? &T->zb[(size_t)y * NV_ZBUF_W + x] : NULL;
                 int shade = (s_gpu.color_mask & 0x01010101u) || s_gpu.alpha_test;
@@ -3391,6 +3395,7 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
     }
     s_gpu.xf_drawn++;
     T.inv_area = 1.0f / area;
+    T.flat_z = a[2] == b[2] && b[2] == c[2];
     /* The edge functions are linear, so a barycentric moves by a constant per
      * pixel step. l0 = w1/area, l1 = w2/area, l2 = w0/area as in xf_rows. */
     T.dl[0][0] = -(c[1] - b[1]) * T.inv_area;  T.dl[0][1] = (c[0] - b[0]) * T.inv_area;
