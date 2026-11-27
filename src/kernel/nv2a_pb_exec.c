@@ -3021,14 +3021,17 @@ static void xf_rows(const XfTri *T, int y0, int step, XfCount *cnt)
  * handful of full-screen passes -- composites, blurs, the menu backdrops --
  * each two triangles of 300,000 pixels through the register combiners. Those
  * split cleanly by row: every pixel reads only its own depth and colour, so
- * interleaved rows on N threads need no locking. Small triangles stay on the
- * executor thread, where waking workers would cost more than it saves.
+ * interleaved rows on N threads need no locking. Only the smallest runs stay
+ * on the executor thread, where waking workers would cost more than it saves:
+ * the estimate is bounding boxes, which counts a thin triangle as nothing, and
+ * a run of many small combiner-heavy triangles costs far more than its
+ * estimate. 256 was the best of 0..8192 on captured frames.
  * RECOMP_RASTER_THREADS=<n> sets the count (1 = off); the default leaves a
  * few cores for the title and the host.
  * ponytail: s_gpu.pixels/pixel_max in put_pixel are unsynchronised stats and
  * may undercount; nothing depends on them. */
 #define NV_RASTER_MAX_THREADS 16
-#define NV_RASTER_MT_MIN_PIXELS 8192
+#define NV_RASTER_MT_MIN_PIXELS 256
 
 /* Worker k owns the rows y with y % n == k, for every triangle of the run,
  * in submission order. Each pixel therefore sees its triangles in the order

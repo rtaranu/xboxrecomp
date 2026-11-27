@@ -325,12 +325,12 @@ int main(void)
      * NV_RASTER_MT_MIN_PIXELS the caller draws every row itself. A real frame
      * is mostly these -- thousands of small triangles -- and that path had no
      * cover at all: it has to be both serial and right. */
-    qx0[0] =  8; qy0[0] =  8; qx1[0] =  48; qy1[0] =  48; qc[0] = colour(3);
-    qx0[1] = 32; qy0[1] = 32; qx1[1] =  72; qy1[1] =  72; qc[1] = colour(9);
+    qx0[0] =  8; qy0[0] =  8; qx1[0] =  14; qy1[0] =  14; qc[0] = colour(3);
+    qx0[1] = 11; qy0[1] = 11; qx1[1] =  17; qy1[1] =  17; qc[1] = colour(9);
     s_stage = "a batch below the multithreading threshold";
     emit_quads(0, 2);
     clear_surface();
-    draw_quads(0, 2);                        /* 2 x 40x40 = 3200 px < 8192 */
+    draw_quads(0, 2);           /* 4 triangles, 6x6 boxes: 144 px < 256 */
     workers = nv2a_raster_last_workers();
     bad = verify(2, &drawn);
     printf("small batch: %d covered pixels, %d wrong, %d worker(s)\n",
