@@ -4763,14 +4763,6 @@ static uint32_t object_instance(uint32_t handle)
 /* The class of the object each subchannel has (method 0); 0 if unknown. */
 static uint32_t s_subch_class[8];
 
-/* The semaphore's memory object (SET_CONTEXT_DMA_SEMAPHORE, 0x1A4): where it
- * starts in guest memory and its last byte's offset. 0: none, or not a
- * linear object that is present. Kept until the next 0x1A4: a release sent
- * after the title frees the object and before it binds another would land
- * in the freed memory. Not handled. */
-static uint32_t s_sem_base, s_sem_limit;
-static int s_sem_taken;       /* the object has taken a release since bound */
-
 /* A linear DMA object's physical start and its last byte's offset; 0 if the
  * handle names none that is present. */
 static int dma_object_range(uint32_t handle, uint32_t *phys, uint32_t *limit)
@@ -4784,21 +4776,6 @@ static int dma_object_range(uint32_t handle, uint32_t *phys, uint32_t *limit)
     *phys = (o[2] & ~0xFFFu) + (o[0] >> 20);
     *limit = o[1];
     return 1;
-}
-
-static void semaphore_object(uint32_t handle)
-{
-    uint32_t base = 0, limit = 0, phys;
-
-    if (dma_object_range(handle, &phys, &limit))
-        base = XBOX_CONTIG_BASE | (phys & 0x0FFFFFFFu);
-    if (base != s_sem_base || limit != s_sem_limit) {
-        fprintf(stderr, "[PB] semaphore object 0x%X: 0x%08X, limit 0x%X%c",
-                handle, base, limit, 10);
-        s_sem_taken = 0;
-    }
-    s_sem_base = base;
-    s_sem_limit = limit;
 }
 
 /* 2D copies: a CONTEXT_SURFACES_2D object (class 0x62) names the source and
@@ -4946,28 +4923,13 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
 
         s_subch_class[subch & 7u] = o ? (*o & 0xFFFu) : 0;
     }
-    if (subch == 0 && method == 0x01A4)
-        semaphore_object(param);
-    /* BACK_END_WRITE_SEMAPHORE_RELEASE: the value goes to the semaphore
-     * object at SET_SEMAPHORE_OFFSET. A project that named the word itself
-     * (nv2a_pb_set_semaphore_target) is served when the commands did not. */
-    if (subch == 0 && method == 0x1D70) {
-        uint32_t off = s_reg[0x1D6C / 4], va = s_sem_va;
-        static int refused;
-
-        if (s_sem_base && off <= s_sem_limit && s_sem_limit - off >= 3u
-                && guest_span_ok((uint64_t)s_sem_base + off, 4)) {
-            va = s_sem_base + off;
-            s_sem_taken = 1;
-        }
-        if (va) {
-            uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
-            *(volatile uint32_t *)(mem + va) = param;
-            return;
-        }
-        if (s_sem_base && refused++ < 4)
-            fprintf(stderr, "[PB] semaphore release refused: offset 0x%X"
-                    " past limit 0x%X%c", off, s_sem_limit, 10);
+    /* BACK_END_WRITE_SEMAPHORE_RELEASE. The title's pointer already names the
+     * semaphore word; SET_SEMAPHORE_OFFSET is not added (in X-Men Legends it
+     * held 0xFF000000 at times, which put the write outside guest memory). */
+    if (subch == 0 && method == 0x1D70 && s_sem_va) {
+        uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
+        *(volatile uint32_t *)(mem + s_sem_va) = param;
+        return;
     }
     if (!s_exec_inited) {
         s_exec_inited = 1;
@@ -5057,7 +5019,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         if (!said++)
             fprintf(stderr, "[PB] pattern colour kept in PGRAPH 0x400B10"
                     " (subchannel %u)%c", subch, 10);
-        if (!s_sem_va && !s_sem_taken) {
+        if (!s_sem_va) {
             uint32_t va = xbox_Nv2aFenceWordVa();
 
             if (va) {

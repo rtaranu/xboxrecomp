@@ -67,16 +67,9 @@ the thread that would otherwise answer.
   first menu). `xbox_Nv2aAckBusyBits` ticks the mirrors as well, so they keep
   pace from inside the walk.
 - **Semaphore.** `BACK_END_WRITE_SEMAPHORE_RELEASE` (`0x1D70`) writes its value
-  into the title's semaphore object, once everything before it has run. The
-  object is the one the title binds with `SET_CONTEXT_DMA_SEMAPHORE`
-  (`0x1A4`): its handle is looked up in the object table the title wrote into
-  instance memory, and the object's page, start and limit read from there. The
-  word is at `SET_SEMAPHORE_OFFSET` (`0x1D6C`) in it; an offset past the limit
-  is refused and logged (in *X-Men Legends* the offset read `0xFF000000` at
-  times). The log shows `[PB] semaphore object 0x8: 0x..., limit 0x20` once
-  per device. Five titles on XDK 3925 to 5849 bind it the same way.
-  `nv2a_pb_set_semaphore_target()` names the word by hand, for a title whose
-  commands do not. How a title's fence wait uses it is in
+  where `nv2a_pb_set_semaphore_target()` was told, once everything before it
+  has run. `SET_SEMAPHORE_OFFSET` is not added: in *X-Men Legends* it held
+  `0xFF000000` at times. How a title's fence wait uses it is in
   [D3D8LTCG Device Context](d3d8ltcg-device-context.md#when-something-does-read-the-pushbuffer).
 - **The pattern object's colour.** XDK 5849's `KickOff` sends, before every
   semaphore release, method `0x0310` to the subchannel that has its pattern
