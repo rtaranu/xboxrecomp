@@ -1507,11 +1507,17 @@ static volatile LONG g_pgraph_fifo_gate;      /* the FIFO was open at the raise 
  * into PGRAPH again. Its handler closes NV_PGRAPH_FIFO for the whole
  * service and reads what the pushbuffer left in the registers after the
  * acknowledgement: a walker resumed at the acknowledgement overwrites them
- * with the next frame's. */
+ * with the next frame's. Read under the page's lock: while a write steps,
+ * PGRAPH_INTR holds the value written, not what it leaves. */
 static int pgraph_trap_over(void)
 {
-    return !PG_REG(PGRAPH_INTR_OFF)
+    int over;
+
+    EnterCriticalSection(&g_pgraph_cs);
+    over = !PG_REG(PGRAPH_INTR_OFF)
            && (!g_pgraph_fifo_gate || (PG_REG(PGRAPH_FIFO_OFF) & 1));
+    LeaveCriticalSection(&g_pgraph_cs);
+    return over;
 }
 
 /* PGRAPH_INTR has just changed to v: PMC_INTR_0 follows. */
